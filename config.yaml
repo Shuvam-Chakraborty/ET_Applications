@@ -1,0 +1,103 @@
+# =============================================================================
+#  ET-Applications — User Configuration File  (Pixel-Wise CSV Edition)
+#  Generates ONE master CSV with every 30 m pixel for the tehsil.
+#  No GEE asset exports needed — all data lands in a local CSV.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# GEE PROJECT
+# -----------------------------------------------------------------------------
+gee_project: "shuvamdownscalinget"          # Your GEE cloud project ID
+
+# -----------------------------------------------------------------------------
+# TEHSIL IDENTIFICATION
+# (Only used for labelling output files — the actual geometry comes from
+#  the GEE asset below.)
+# -----------------------------------------------------------------------------
+tehsil:
+  state    : "UTTAR PRADESH"
+  district : "BANDA"
+  name     : "TELYANI"
+
+# -----------------------------------------------------------------------------
+# GEE ASSET PATHS
+# -----------------------------------------------------------------------------
+assets:
+  # The tehsil boundary FeatureCollection.
+  tehsil_asset : "projects/shuvamdownscalinget/assets/tehsil_uttar_pradesh__banda__telyani"
+
+  # The Random Forest model for 30 m AET downscaling.
+  model_aez    : "projects/shuvamdownscalinget/assets/rf_aez4_final"
+
+  # ── REMOVED ──────────────────────────────────────────────────────────────
+  # No pre-exported pixel stacks are needed in this version.
+  # Everything is computed on-the-fly and downloaded directly to CSV.
+  # ─────────────────────────────────────────────────────────────────────────
+
+# -----------------------------------------------------------------------------
+# MODIS COLLECTION  (PET source for RWDI and Water Stress)
+# -----------------------------------------------------------------------------
+modis:
+  collection: "MODIS/061/MOD16A2"
+
+# -----------------------------------------------------------------------------
+# TIME PARAMETERS
+# -----------------------------------------------------------------------------
+time:
+  year : 2022          # Year to process (Landsat 8 scenes + MODIS)
+
+# -----------------------------------------------------------------------------
+# COMPUTATION SETTINGS
+# -----------------------------------------------------------------------------
+compute:
+  # chunk_size: approximate number of 30 m pixels per download tile.
+  # The tehsil has ~462 000 pixels. The script tiles the bounding box so
+  # each GEE request handles ~chunk_size pixels (safe default = 25 000).
+  # If you get "User memory limit exceeded" errors → lower to 10000.
+  # If downloads are very slow → raise to 50000.
+  chunk_size: 3000
+
+# -----------------------------------------------------------------------------
+# APPLICATION TO RUN
+# -----------------------------------------------------------------------------
+# Options:
+#   all          — monthly AET, annual ET, RWDI, Water Stress  (default)
+#   monthly_et   — only monthly AET stack download
+#   annual_et    — monthly AET + annual total ET (no MODIS PET)
+#   rwdi         — monthly AET + RWDI (needs MODIS PET)
+#   water_stress — monthly AET + Water Stress (needs MODIS PET)
+application: "all"
+
+# -----------------------------------------------------------------------------
+# OUTPUT SETTINGS
+# -----------------------------------------------------------------------------
+output:
+  directory: "./results"     # CSV and PNG files are written here
+  plot      : true           # Set to false to skip matplotlib plots
+
+# =============================================================================
+# OUTPUT CSV COLUMNS (reference)
+# =============================================================================
+# pixel_id                       unique integer per 30 m pixel
+# longitude, latitude            pixel centroid in WGS84
+#
+# ET_Jan_daily_01mm … ET_Dec_daily_01mm   mean daily AET (0.1 mm/day)
+# ET_Jan_daily_mm   … ET_Dec_daily_mm     mean daily AET (mm/day)
+#
+# PET_Jan_daily_01mm … PET_Dec_daily_01mm  mean daily MODIS PET (0.1 mm/day)
+# PET_Jan_daily_mm   … PET_Dec_daily_mm    mean daily MODIS PET (mm/day)
+#
+# ET_annual_01mm                 annual total ET (0.1 mm/yr)
+#                                = Σ_m(ET_m_daily × days_in_month_m)
+# ET_annual_mm                   annual total ET (mm/yr)
+#
+# RWDI_Jan … RWDI_Dec            Relative Water Deficit Index (%)
+#                                = (1 − AET/PET) × 100
+# RWDI_annual                    mean RWDI across all 12 months
+#
+# WaterStress_Jan … WaterStress_Dec  AET/PET ratio (0–1)
+# WaterStress_annual                 mean water stress across 12 months
+#
+# gap_filled_months              comma-separated month abbreviations that
+#                                had no Landsat scenes and were filled by
+#                                ±2-month temporal interpolation
