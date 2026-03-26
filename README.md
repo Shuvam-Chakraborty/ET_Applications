@@ -1,7 +1,9 @@
 # ET-Applications
  
 **Platform:** Google Earth Engine (GEE) + Python 3.x (3.10 or higher)
+
 **Output:** Multi-band GeoTIFF rasters at 30 m resolution for any tehsil in India  
+
 **Models & Training Data:** [Pan_India_Downscaled_Evapotranspiration](https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration)
 
 ---
