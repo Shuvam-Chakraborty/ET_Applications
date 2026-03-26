@@ -1,7 +1,8 @@
 # =============================================================================
-#  ET-Applications — User Configuration File  (Pixel-Wise CSV Edition)
-#  Generates ONE master CSV with every 30 m pixel for the tehsil.
-#  No GEE asset exports needed — all data lands in a local CSV.
+#  ET-Applications — User Configuration File  (GeoTIFF Raster Edition)
+#  Generates multi-band GeoTIFF rasters at 30 m resolution for the tehsil.
+#  All output files are spatially aligned and can be opened in QGIS, ArcGIS,
+#  or any GDAL/rasterio-based workflow.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -11,7 +12,7 @@ gee_project: "shuvamdownscalinget"          # Your GEE cloud project ID
 
 # -----------------------------------------------------------------------------
 # TEHSIL IDENTIFICATION
-# (Only used for labelling output files — the actual geometry comes from
+# (Used for labelling output files only — the actual geometry comes from
 #  the GEE asset below.)
 # -----------------------------------------------------------------------------
 tehsil:
@@ -28,11 +29,6 @@ assets:
 
   # The Random Forest model for 30 m AET downscaling.
   model_aez    : "projects/shuvamdownscalinget/assets/rf_aez4_final"
-
-  # ── REMOVED ──────────────────────────────────────────────────────────────
-  # No pre-exported pixel stacks are needed in this version.
-  # Everything is computed on-the-fly and downloaded directly to CSV.
-  # ─────────────────────────────────────────────────────────────────────────
 
 # -----------------------------------------------------------------------------
 # MODIS COLLECTION  (PET source for RWDI and Water Stress)
@@ -51,9 +47,9 @@ time:
 # -----------------------------------------------------------------------------
 compute:
   # chunk_size: approximate number of 30 m pixels per download tile.
-  # The tehsil has ~462 000 pixels. The script tiles the bounding box so
-  # each GEE request handles ~chunk_size pixels (safe default = 25 000).
-  # If you get "User memory limit exceeded" errors → lower to 10000.
+  # The script tiles the bounding box so each GEE getDownloadURL request
+  # covers ~chunk_size pixels. Safe default = 25000.
+  # If you get "User memory limit exceeded" errors → lower to 5000 or 1000.
   # If downloads are very slow → raise to 50000.
   chunk_size: 3000
 
@@ -61,43 +57,51 @@ compute:
 # APPLICATION TO RUN
 # -----------------------------------------------------------------------------
 # Options:
-#   all          — monthly AET, annual ET, RWDI, Water Stress  (default)
-#   monthly_et   — only monthly AET stack download
-#   annual_et    — monthly AET + annual total ET (no MODIS PET)
-#   rwdi         — monthly AET + RWDI (needs MODIS PET)
-#   water_stress — monthly AET + Water Stress (needs MODIS PET)
+#   all          — monthly AET, annual ET, PET, RWDI, Water Stress  (default)
+#   monthly_et   — only monthly AET GeoTIFF
+#   annual_et    — monthly AET + annual total ET GeoTIFF
+#   pet          — monthly PET GeoTIFF (MODIS)
+#   rwdi         — monthly RWDI + annual mean GeoTIFF
+#   water_stress — monthly Water Stress + annual mean GeoTIFF
 application: "all"
 
 # -----------------------------------------------------------------------------
 # OUTPUT SETTINGS
 # -----------------------------------------------------------------------------
 output:
-  directory: "./results"     # CSV and PNG files are written here
+  directory: "./results"     # GeoTIFF and PNG files are written here
   plot      : true           # Set to false to skip matplotlib plots
 
+# -----------------------------------------------------------------------------
+# OPTIONAL: SAMPLE POINT TIME SERIES
+# If provided, a 4-panel monthly timeseries plot is generated for the
+# pixel nearest to this location. No additional GEE calls are made.
+# -----------------------------------------------------------------------------
+# sample_point:
+#   lon: 80.7314
+#   lat: 25.9735
+
 # =============================================================================
-# OUTPUT CSV COLUMNS (reference)
+# OUTPUT GEOTIFF REFERENCE
 # =============================================================================
-# pixel_id                       unique integer per 30 m pixel
-# longitude, latitude            pixel centroid in WGS84
 #
-# ET_Jan_daily_01mm … ET_Dec_daily_01mm   mean daily AET (0.1 mm/day)
-# ET_Jan_daily_mm   … ET_Dec_daily_mm     mean daily AET (mm/day)
+# File                              Bands  Unit       Description
+# ────────────────────────────────────────────────────────────────────────────
+# monthly_et_<TEHSIL>_<YEAR>.tif    12    mm/day     Mean daily AET per month
+# annual_et_<TEHSIL>_<YEAR>.tif      1    mm/yr      Annual total AET
+# pet_<TEHSIL>_<YEAR>.tif           12    mm/day     Mean daily PET per month
+# rwdi_<TEHSIL>_<YEAR>.tif          13    %          RWDI per month + band 13
+#                                                    = annual mean
+# water_stress_<TEHSIL>_<YEAR>.tif  13    ratio 0-1  AET/PET per month + band
+#                                                    13 = annual mean
 #
-# PET_Jan_daily_01mm … PET_Dec_daily_01mm  mean daily MODIS PET (0.1 mm/day)
-# PET_Jan_daily_mm   … PET_Dec_daily_mm    mean daily MODIS PET (mm/day)
+# Band descriptions are embedded in every GeoTIFF.
+# Open in QGIS: Layer > Add Layer > Add Raster Layer, then select bands in
+# the Layer Styling panel.
 #
-# ET_annual_01mm                 annual total ET (0.1 mm/yr)
-#                                = Σ_m(ET_m_daily × days_in_month_m)
-# ET_annual_mm                   annual total ET (mm/yr)
+# NoData value: -9999 (applied to pixels outside the tehsil boundary and to
+# pixels where MODIS PET has no data).
 #
-# RWDI_Jan … RWDI_Dec            Relative Water Deficit Index (%)
-#                                = (1 − AET/PET) × 100
-# RWDI_annual                    mean RWDI across all 12 months
-#
-# WaterStress_Jan … WaterStress_Dec  AET/PET ratio (0–1)
-# WaterStress_annual                 mean water stress across 12 months
-#
-# gap_filled_months              comma-separated month abbreviations that
-#                                had no Landsat scenes and were filled by
-#                                ±2-month temporal interpolation
+# All GeoTIFFs produced by one run share the same CRS, transform, and
+# 30 m pixel grid — they can be overlaid without reprojection.
+# =============================================================================
