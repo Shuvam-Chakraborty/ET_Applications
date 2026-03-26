@@ -1,15 +1,15 @@
 # ET-Applications
  
-**Platform:** Google Earth Engine (GEE) + Python 3.x  
+**Platform:** Google Earth Engine (GEE) + Python 3.x (3.10 or higher)
 **Output:** Multi-band GeoTIFF rasters at 30 m resolution for any tehsil in India  
-**Models & Training Data:** [Pan_India_Downscaled_Evapotranspiration on GitHub](https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration)
+**Models & Training Data:** [Pan_India_Downscaled_Evapotranspiration](https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration)
 
 ---
 
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
-2. [Use Cases](#2-use-cases)
+2. [Applications](#2-applications)
 3. [Repository Structure](#3-repository-structure)
 4. [Prerequisites and Access Requirements](#4-prerequisites-and-access-requirements)
 5. [Environment Setup](#5-environment-setup)
@@ -24,78 +24,49 @@
 14. [Python Function Reference](#14-python-function-reference)
 15. [Working with Output GeoTIFFs](#15-working-with-output-geotiffs)
 16. [Changing to a Different Tehsil](#16-changing-to-a-different-tehsil)
-17. [Troubleshooting](#17-troubleshooting)
 
 ---
 
 ## 1. Project Overview
 
-ET-Applications downscales MODIS-resolution evapotranspiration data to the native 30 m Landsat 8 grid using pre-trained Random Forest models — one model per Agro-Ecological Zone (AEZ) covering all of India. For any selected tehsil, the tool generates **multi-band GeoTIFF rasters** containing:
+ET-Applications uses pre-trained Random Forest models for downscaling evapotranspiration — one model per Agro-Ecological Zone (AEZ) covering all of India(Except Andaman and Nicobar Islands). For any selected tehsil, the tool generates **multi-band GeoTIFF rasters** containing:
 
 - Monthly mean daily Actual Evapotranspiration (AET) — 12 bands
 - Annual total AET — 1 band
-- Monthly mean daily Potential Evapotranspiration (PET) from MODIS MOD16A2 — 12 bands
+- Monthly mean daily Potential Evapotranspiration (PET) from MODIS (MOD16A2) — 12 bands
 - Relative Water Deficit Index (RWDI) per month + annual mean — 13 bands
 - Water Stress ratio (AET/PET) per month + annual mean — 13 bands
 
 All output GeoTIFFs share the same CRS, bounding box, and 30 m pixel grid, making them directly overlay-compatible in any GIS environment without reprojection. Band descriptions and metadata (units, source, year, gap-fill status) are embedded in every file.
 
-The Random Forest models and their training data are fully documented and openly available at:  
+If you want to re-train the Random Forest models then the training data and scripts are fully documented and openly available at:  
 **https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration**
 
 ---
 
-## 2. Use Cases
+## 2. Applications
 
-ET-Applications is designed for researchers, water resource planners, and agricultural scientists who need high-resolution evapotranspiration data at the tehsil scale. Below are the primary use cases for each output product.
+ET-Applications is designed for researchers, water resource planners, and agricultural scientists who need high-resolution evapotranspiration data at the 30x30 pixel scale. Below are the primary use cases for each output product.
 
 ### Actual Evapotranspiration (AET)
 
 AET represents the real water lost from the land surface through evaporation and plant transpiration under actual soil moisture conditions. At 30 m resolution, it can reveal spatial heterogeneity within a tehsil that is invisible in coarser MODIS data.
 
-**Use cases:**
-- Estimating crop water consumption and irrigation demand at field scale
-- Calibrating and validating hydrological models (e.g., SWAT, VIC) at the tehsil level
-- Monitoring seasonal and inter-annual variability in water use across land cover types
-- Comparing AET between irrigated and rainfed areas within the same tehsil
-
 ### Potential Evapotranspiration (PET)
 
-PET is the amount of water that would evaporate and transpire given unlimited water availability — a measure of atmospheric demand. Sourced from MODIS MOD16A2 and resampled to 30 m, it serves as a baseline reference for stress calculations.
-
-**Use cases:**
-- Computing crop coefficients (Kc = AET/PET) for agricultural planning
-- Understanding the atmospheric water demand across seasons
-- Identifying periods when water demand exceeds available supply
+PET is the amount of water that would evaporate and transpire given unlimited water availability — a measure of atmospheric demand. Sourced from MODIS(MOD16A2) and resampled to 30 m, it serves as a baseline reference for stress calculations.
 
 ### Relative Water Deficit Index (RWDI)
 
 RWDI = (1 − AET/PET) × 100 (%). A higher value means the land surface is more water-stressed — plants are evapotranspiring much less than they theoretically could. RWDI of 0% indicates no deficit; values above 80% indicate severe to extreme drought stress.
 
-**Use cases:**
-- Agricultural drought monitoring at tehsil and village scale
-- Identifying which months and which parts of a tehsil experience the worst water stress
-- Supporting crop insurance assessment and relief targeting
-- Inputs to multi-hazard drought indices for policy reporting
-
 ### Water Stress Ratio (AET/PET)
 
 The inverse of RWDI expressed as a ratio from 0 to 1. A value of 1.0 means the land is meeting its full evapotranspiration demand; values near 0 indicate extreme stress.
 
-**Use cases:**
-- Integrating into land surface model validation workflows
-- Mapping irrigated vs. rainfed agriculture based on seasonal stress patterns
-- Input layer for crop yield prediction models
-- Long-term trend analysis when run over multiple years
-
 ### Sample Point Time Series
 
 The optional single-pixel timeseries plot extracts the 12-month AET, PET, RWDI, and Water Stress values for a user-specified coordinate from the already-downloaded GeoTIFFs without any additional GEE calls.
-
-**Use cases:**
-- Field station validation against ground measurements (eddy covariance, lysimeter)
-- Quick inspection of a specific farm, forest patch, or monitoring site
-- Generating figures for reports and publications from a known coordinate
 
 ---
 
@@ -103,12 +74,12 @@ The optional single-pixel timeseries plot extracts the 12-month AET, PET, RWDI, 
 
 ```
 et-applications/
+├── 1_Check_Tehsil.js              GEE Script 1 — verify tehsil before export
+├── 2_Generate_Tehsil_Boundary.js  GEE Script 2 — export tehsil asset
 ├── et_applications.py             Main Python CLI application
 ├── config.yaml                    User configuration file (edit this)
 ├── requirements.txt               Python package dependencies
-├── 1_Check_Tehsil.js              GEE Script 1 — verify tehsil before export
-├── 2_Generate_Tehsil_Boundary.js  GEE Script 2 — export tehsil asset
-├── README.md
+├── README.md                      README File
 └── results/                       Output directory (created automatically)
 ```
 
@@ -123,7 +94,7 @@ GEE Code Editor                         Local Machine
         |
         └── copy asset path into config.yaml
                                             |
-                                    python et_applications.py
+                                    python3 et_applications.py
                                             |
                                     results/ GeoTIFF + PNG files
 ```
@@ -140,25 +111,17 @@ GEE Code Editor                         Local Machine
 
 ### 4.2 GEE Asset Access
 
-Two GEE assets are required before running the Python script:
+Few GEE assets are required before running the Python script:
 
-| Asset | Path in config.yaml | Who Owns It | What You Need to Do |
-|---|---|---|---|
-| Tehsil boundary asset | `assets.tehsil_asset` | You (created by Script 2) | Created automatically — no action after export |
-| RF model asset | `assets.model_aez` | Publicly shared | See Section 13 for all 19 AEZ model paths |
-| India block boundaries | `users/mtpictd/india_block_boundaries` | External dataset | Must be public or shared with your account |
-
-**To verify or set an asset as public in GEE:**
-
-1. Open the GEE Code Editor at https://code.earthengine.google.com
-2. In the left panel, click the **Assets** tab.
-3. Locate the asset, click the three-dot menu, and select **Share**.
-4. Under "Add people", type `allUsers` and set permission to **Reader**.
-5. Click **Save**.
+| Asset | Path in config.yaml | Who Owns It |
+|---|---|---|
+| Tehsil boundary asset | `assets.tehsil_asset` |  You can create it by running 2_Generate_Tehsil_Boundary.js |
+| RF model asset | `assets.model_aez` | Publicly shared. See Section 13 for all 19 AEZ model paths |
+| India block boundaries | `users/mtpictd/india_block_boundaries` | Publicly shared |
 
 ### 4.3 Python Requirements
 
-- Python 3.9 or higher
+- Python 3.10 or higher
 - pip
 
 ---
@@ -168,7 +131,7 @@ Two GEE assets are required before running the Python script:
 ### 5.1 Install Python Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 The `requirements.txt` installs:
@@ -182,12 +145,10 @@ The `requirements.txt` installs:
 | requests | 2.28 | Downloads GeoTIFF tiles from GEE thumbnail URLs |
 | rasterio | 1.3 | Merges downloaded tiles and writes final GeoTIFF files |
 
-> **Note:** `pandas` is not required. This version uses rasterio and numpy to write GeoTIFF rasters directly, replacing the previous CSV-based approach.
-
 ### 5.2 Verify Installation
 
 ```bash
-python -c "import ee, numpy, rasterio, requests, yaml; print('All packages OK')"
+python3 -c "import ee, numpy, rasterio, requests, yaml; print('All packages OK')"
 ```
 
 ---
@@ -295,7 +256,7 @@ sample_point:
 - `tehsil.name`, `tehsil.state`, `tehsil.district`: Used only for naming output files. The processing geometry always comes from `assets.tehsil_asset`.
 - `assets.model_aez`: Select the RF model corresponding to your tehsil's Agro-Ecological Zone. All 19 publicly accessible AEZ model paths are listed in Section 13.
 - `time.year`: Landsat 8 (Collection 2, Tier 1 L2) is available from 2013 onward. MODIS MOD16A2 PET is available from 2000 onward.
-- `compute.chunk_size`: If you receive `User memory limit exceeded` errors from GEE, reduce this value (e.g., to `1000` or `500`). If downloads are slow, raise it to `50000`.
+- `compute.chunk_size`: If you receive `User memory limit exceeded` errors from GEE, reduce this value (e.g., to `1000` or `500`). If downloads are slow, raise it to `5000`.
 
 ---
 
@@ -306,7 +267,7 @@ Before running the script for the first time (and whenever your token expires), 
 ### 8.1 Run Authentication
 
 ```bash
-earthengine authenticate --auth_mode notebook
+earthengine authenticate --auth_mode=notebook
 ```
 
 ### 8.2 Follow the Authentication Steps
@@ -319,7 +280,7 @@ earthengine authenticate --auth_mode notebook
 ### 8.3 Verify Authentication
 
 ```bash
-python -c "import ee; ee.Initialize(project='your-project-id'); print('EE authenticated OK')"
+python3 -c "import ee; ee.Initialize(project='your-project-id'); print('EE authenticated OK')"
 ```
 
 Replace `your-project-id` with your actual GEE Cloud Project ID.
@@ -331,7 +292,7 @@ Replace `your-project-id` with your actual GEE Cloud Project ID.
 With `config.yaml` set and authentication complete, run the script from the directory containing both `et_applications.py` and `config.yaml`:
 
 ```bash
-python et_applications.py
+python3 et_applications.py
 ```
 
 This reads all settings from `config.yaml`. The default `application: "all"` generates all five output GeoTIFFs in a single GEE download pass.
@@ -342,19 +303,19 @@ Any value in `config.yaml` can be overridden with a CLI flag. Command-line argum
 
 ```bash
 # Run only the monthly AET application
-python et_applications.py --application monthly_et
+python3 et_applications.py --application monthly_et
 
 # Change the output year
-python et_applications.py --year 2021
+python3 et_applications.py --year 2021
 
 # Use a different tehsil asset
-python et_applications.py --tehsil-asset "projects/myproject/assets/tehsil_x"
+python3 et_applications.py --tehsil-asset "projects/myproject/assets/tehsil_x"
 
 # Enable plots even if config.yaml has plot: false
-python et_applications.py --plot
+python3 et_applications.py --plot
 
 # Extract a timeseries plot for a single pixel by coordinates
-python et_applications.py --sample-lon 80.34 --sample-lat 25.12
+python3 et_applications.py --sample-lon 80.34 --sample-lat 25.12
 
 # Use a different config file
 python et_applications.py --config /path/to/other_config.yaml
@@ -497,7 +458,7 @@ The downscaling pipeline uses one Random Forest model per Agro-Ecological Zone (
 | AEZ 18 | `projects/shuvamdownscalinget/assets/rf_aez18_final` |
 | AEZ 19 | `projects/shuvamdownscalinget/assets/rf_aez19_final` |
 
-For full details on how these models were trained, the input features used, validation results, and the AEZ delineation map, see:
+For full details on how these models were trained, the input features used, validation results, see:
 
 **https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration**
 
@@ -561,7 +522,7 @@ Tiles the tehsil bounding box into a grid of small rectangles, each approximatel
 Opens all temporary tile GeoTIFFs, mosaics them using `rasterio.merge`, extracts the profile (CRS, transform, dimensions), and cleans up all temporary files regardless of success or failure. GDAL/libtiff C-level warnings that fire on multi-band tiles are suppressed at the file-descriptor level using the `_quiet_gdal()` context manager.
 
 **`_quiet_gdal()`**  
-A context manager that temporarily redirects `stderr` (file descriptor 2) to `/dev/null` during rasterio calls. This is the only reliable way to suppress `Warning 1: TIFFReadDirectory …` messages that come from the libtiff C library and bypass Python's `warnings` module entirely.
+A context manager that temporarily redirects `stderr` to `/dev/null` during rasterio calls. This is the only reliable way to suppress `Warning 1: TIFFReadDirectory …` messages that come from the libtiff C library and bypass Python's `warnings` module entirely.
 
 **`_save_geotiff(arr, profile, output_path, band_names, metadata)`**  
 Writes a numpy array `(n_bands, H, W)` as a LZW-compressed Float32 GeoTIFF. Embeds band descriptions (visible in QGIS and rasterio) and optional metadata tags (units, year, gap-fill status). Uses `PHOTOMETRIC=MINISBLACK` to prevent GDAL from emitting ExtraSamples warnings on files with more than 3 bands. Prints a summary of the saved file (dimensions, valid pixel count, file size).
@@ -620,58 +581,6 @@ If a `sample_point` is configured, reads the pixel nearest to the specified lon/
 
 ## 15. Working with Output GeoTIFFs
 
-### Opening in QGIS
-
-1. Go to **Layer > Add Layer > Add Raster Layer**.
-2. Browse to the `.tif` file and click **Add**.
-3. In the **Layer Styling** panel, select individual bands using the **Band** dropdown.
-4. Use the **Multiband Color** renderer to display three bands simultaneously (e.g., Jan, Apr, Jul).
-
-### Reading in Python with rasterio
-
-```python
-import rasterio
-import numpy as np
-
-# Open the monthly AET GeoTIFF
-with rasterio.open('results/monthly_et_TELYANI_2022.tif') as ds:
-    print("CRS:", ds.crs)
-    print("Transform:", ds.transform)
-    print("NoData:", ds.nodata)
-    print("Band descriptions:", ds.descriptions)
-
-    # Read all 12 monthly bands as a numpy array (12, H, W)
-    aet = ds.read()
-
-# Mask NoData
-aet_masked = np.where(aet == -9999, np.nan, aet)
-
-# Compute tehsil-wide monthly means
-monthly_means = np.nanmean(aet_masked.reshape(12, -1), axis=1)
-print("Monthly AET means (mm/day):", monthly_means)
-```
-
-### Reading in Python with GDAL
-
-```python
-from osgeo import gdal
-ds = gdal.Open('results/monthly_et_TELYANI_2022.tif')
-band = ds.GetRasterBand(1)        # January (1-indexed)
-data = band.ReadAsArray()
-nodata = band.GetNoDataValue()    # -9999.0
-```
-
-### Stacking all outputs into a single file (GDAL command line)
-
-```bash
-gdal_merge.py -o combined_TELYANI_2022.tif -separate \
-  results/monthly_et_TELYANI_2022.tif \
-  results/annual_et_TELYANI_2022.tif \
-  results/pet_TELYANI_2022.tif \
-  results/rwdi_TELYANI_2022.tif \
-  results/water_stress_TELYANI_2022.tif
-```
-
 ### Visualising in GEE (after uploading as assets)
 
 When you upload a GeoTIFF to GEE as an image asset, GEE renames bands to `b1`, `b2`, … regardless of the embedded band descriptions. Use `b1` through `b12` (or `b13`) when selecting bands in GEE scripts.
@@ -720,79 +629,9 @@ time:
 **Step 4 — Run**
 
 ```bash
-python et_applications.py
+python3 et_applications.py
 ```
 
 Output files are named using the tehsil name and year (e.g., `monthly_et_NEWNAME_2022.tif`), so existing results are not overwritten.
 
 ---
-
-## 17. Troubleshooting
-
-**"No features found" in GEE Script 1**
-
-The `state`, `district`, or `tehsil` value in CONFIG does not match the dataset spelling. The script prints a list of valid names for the given district or state. Use those exact strings (UPPER CASE).
-
-**Authentication error when running et_applications.py**
-
-Your token has expired or was never created. Re-authenticate:
-
-```bash
-earthengine authenticate --auth_mode=notebook
-```
-
-**"User memory limit exceeded" from GEE**
-
-The `chunk_size` value is too large. Lower it:
-
-```yaml
-compute:
-  chunk_size: 1000
-```
-
-Progressively halve the value until the error stops. For large tehsils or the 49-band `all` mode, values as low as `500` may be necessary.
-
-**"Asset not found" or "Permission denied"**
-
-Either the GEE export task did not complete, or the asset is not shared with your account. Check:
-
-1. In the GEE Code Editor, go to the Assets tab and confirm the asset is present.
-2. Click Share on the asset and verify your Google account has at minimum Reader access.
-3. The 19 RF model assets in Section 13 are publicly accessible — if you receive a permission error on one of them, verify the asset path is typed correctly.
-
-**Slow downloads / partial GeoTIFF**
-
-GEE throughput varies by time of day. If a tile fails after 4 attempts, a warning is printed and that tile is skipped — the output GeoTIFF may have NoData patches. Re-run the same application; the script will re-attempt all tiles. For consistently slow downloads, ensure `chunk_size` is not unnecessarily large.
-
-**Missing months in output / NoData for some months**
-
-Months with no Landsat 8 scenes are gap-filled automatically. Check which months were filled:
-
-```python
-import rasterio
-with rasterio.open('results/monthly_et_TELYANI_2022.tif') as ds:
-    print(ds.tags().get('gap_filled_months'))
-```
-
-If many months are gap-filled, try a different year in `config.yaml`.
-
-**`RuntimeWarning: Mean of empty slice`**
-
-This is suppressed in `et_applications.py` v2.1 using `warnings.catch_warnings()` in `_annual_mean_band`. If you still see it, ensure you are running the latest version of the script.
-
-**matplotlib not installed / plots not generating**
-
-```bash
-pip install matplotlib>=3.7
-```
-
-Set `plot: false` in `config.yaml` if you do not need plots.
-
-**`rasterio` import error**
-
-On some systems rasterio requires GDAL to be installed first. See:  
-https://rasterio.readthedocs.io/en/stable/installation.html
-
-**GEE band names show `b1`, `b2`, … instead of descriptive names**
-
-This is expected behaviour when a GeoTIFF is uploaded to GEE as an image asset. GEE ignores embedded band descriptions and assigns sequential names. Use `b1` through `b12`/`b13` when writing GEE scripts against uploaded assets.
