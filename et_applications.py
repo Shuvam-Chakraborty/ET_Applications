@@ -25,11 +25,10 @@ and can be opened directly in QGIS, ArcGIS, or any rasterio/GDAL workflow.
   annual_et     ->  annual_et_<TEHSIL>_<YEAR>.tif      1 band   (mm/yr)
   pet           ->  pet_<TEHSIL>_<YEAR>.tif            12 bands  (mm/day)
   rwdi          ->  rwdi_<TEHSIL>_<YEAR>.tif           13 bands  (%)
-  water_stress  ->  water_stress_<TEHSIL>_<YEAR>.tif   13 bands  (ratio)
   kc            ->  kc_<TEHSIL>_<YEAR>.tif             13 bands  (ratio)
   gpp           ->  gpp_<TEHSIL>_<YEAR>.tif            13 bands  (g C/m2/day)
   wue           ->  wue_<TEHSIL>_<YEAR>.tif            13 bands  (g C/kg H2O)
-  all           ->  all eight GeoTIFFs (ONE combined download, stacks built once)
+  all           ->  all seven GeoTIFFs (ONE combined download, stacks built once)
 
   GPP Method (Light Use Efficiency)
   ----------------------------------
@@ -46,12 +45,12 @@ and can be opened directly in QGIS, ArcGIS, or any rasterio/GDAL workflow.
 
   Quick-start
   -----------
-  python et_applications.py                          # all from config.yaml
-  python et_applications.py --application monthly_et
-  python et_applications.py --application kc
-  python et_applications.py --application gpp
-  python et_applications.py --application wue
-  python et_applications.py --application all --plot
+  python3 et_applications.py                          # all from config.yaml
+  python3 et_applications.py --application monthly_et
+  python3 et_applications.py --application kc
+  python3 et_applications.py --application gpp
+  python3 et_applications.py --application wue
+  python3 et_applications.py --application all --plot
 """
 
 import argparse
@@ -171,14 +170,13 @@ _BPLUT_DEFAULT_CLASS = 10
 # ---------------------------------------------------------------------------
 # BAND LAYOUT - combined 61-band download image for run_all()
 # ---------------------------------------------------------------------------
-# AET(12) PET(12) Annual(1) RWDI(12) WS(12) GPP(12)
+# AET(12) PET(12) Annual(1) RWDI(12) KC(12) GPP(12)
 _AET_SLICE = slice(0, 12)       # ET_01 ... ET_12        (0.1 mm/day)
 _PET_SLICE = slice(12, 24)      # PET_01 ... PET_12      (0.1 mm/day)
 _ANNUAL_SLICE = slice(24, 25)   # annual_ET_01mm         (0.1 mm/yr)
 _RWDI_SLICE = slice(25, 37)     # RWDI_01 ... RWDI_12    (%)
-_WS_SLICE = slice(37, 49)       # WS_01 ... WS_12        (ratio 0-1)
+_KC_SLICE = slice(37, 49)       # KC_01 ... KC_12        (ratio 0-1)
 _GPP_SLICE = slice(49, 61)      # GPP_01 ... GPP_12      (g C/m2/day)
-# KC is derived from _WS_SLICE.
 # WUE is derived numpy-side from _GPP_SLICE / (_AET_SLICE x 0.1).
 
 
@@ -608,26 +606,21 @@ def build_rwdi_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
     return stack
 
 
-def build_ws_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
-    """WS_01...12 = AET / PET (0-1)"""
+def build_kc_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
+    """KC_01...12 = AET / PET (0-1)"""
     bands = []
     for month in range(1, 13):
-        ws = (
+        kc = (
             aet_stack.select(f"ET_{month:02d}")
             .divide(pet_stack.select(f"PET_{month:02d}"))
-            .rename(f"WS_{month:02d}")
+            .rename(f"KC_{month:02d}")
             .float()
         )
-        bands.append(ws)
+        bands.append(kc)
     stack = bands[0]
     for band in bands[1:]:
         stack = stack.addBands(band)
     return stack
-
-
-def build_kc_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
-    """KC_01...12 = AET / PET (same ratio as water_stress, explicit Kc output)."""
-    return build_ws_image(aet_stack, pet_stack).rename([f"KC_{month:02d}" for month in range(1, 13)])
 
 
 def build_combined_image(aet_stack: ee.Image, pet_stack: ee.Image,
@@ -640,20 +633,20 @@ def build_combined_image(aet_stack: ee.Image, pet_stack: ee.Image,
         PET_01 ... PET_12        (0.1 mm/day)
         annual_ET_01mm           (0.1 mm/yr)
         RWDI_01 ... RWDI_12      (%)
-        WS_01 ... WS_12          (0-1)
+        KC_01 ... KC_12          (0-1)
         GPP_01 ... GPP_12        (g C/m2/day)
-        KC derived from WS, WUE derived from GPP/AET in Python.
+        WUE derived from GPP/AET in Python.
     """
     annual_img = build_annual_et_image(aet_stack, year)
     rwdi_img = build_rwdi_image(aet_stack, pet_stack)
-    ws_img = build_ws_image(aet_stack, pet_stack)
+    kc_img = build_kc_image(aet_stack, pet_stack)
 
     return (
         aet_stack
         .addBands(pet_stack.unmask(NODATA))
         .addBands(annual_img)
         .addBands(rwdi_img.unmask(NODATA))
-        .addBands(ws_img.unmask(NODATA))
+        .addBands(kc_img.unmask(NODATA))
         .addBands(gpp_stack.unmask(NODATA))
     )
 
@@ -1248,47 +1241,27 @@ def run_rwdi(cfg: dict, region: ee.Geometry, aet_stack=None,
     return out_path
 
 
-def _run_ratio_application(cfg: dict, region: ee.Geometry, aet_stack=None,
-                           gap_flags=None, pet_stack=None,
-                           mode: str = "water_stress") -> str:
-    """Shared runner for water_stress and kc since both are AET/PET."""
+def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
+                        gap_flags=None, pet_stack=None) -> str:
+    """Shared runner for the monthly Kc proxy (AET/PET)."""
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
     outdir = cfg["output"]
     chunk_size = cfg.get("chunk_size", 25000)
     modis_col = cfg.get("modis_collection", MODIS_COL)
-
-    if mode == "water_stress":
-        label = "water_stress"
-        title = "Water Stress"
-        stack_builder = build_ws_image
-        band_names = [f"WaterStress_{abbr}" for abbr in MONTH_ABBR] + ["WaterStress_annual"]
-        output_name = f"water_stress_{tehsil}_{year}.tif"
-        metadata = {
-            "units": "ratio (0-1)",
-            "formula": "AET / PET",
-            "year": str(year),
-            "tehsil": tehsil,
-            "description": "Water Stress ratio per month + annual mean",
-        }
-        plotter = _plot_water_stress
-    else:
-        label = "kc"
-        title = "Crop Coefficient (Kc)"
-        stack_builder = build_kc_image
-        band_names = [f"KC_{abbr}" for abbr in MONTH_ABBR] + ["KC_annual"]
-        output_name = f"kc_{tehsil}_{year}.tif"
-        metadata = {
-            "units": "ratio (AET/PET)",
-            "formula": "AET / PET",
-            "year": str(year),
-            "tehsil": tehsil,
-            "description": (
-                "Monthly Kc proxy from AET/PET + annual mean. "
-                "Numerically identical to water_stress output."
-            ),
-        }
-        plotter = _plot_kc
+    label = "kc"
+    title = "Crop Coefficient (Kc)"
+    stack_builder = build_kc_image
+    band_names = [f"KC_{abbr}" for abbr in MONTH_ABBR] + ["KC_annual"]
+    output_name = f"kc_{tehsil}_{year}.tif"
+    metadata = {
+        "units": "ratio (AET/PET)",
+        "formula": "AET / PET",
+        "year": str(year),
+        "tehsil": tehsil,
+        "description": "Monthly Kc proxy from AET/PET + annual mean",
+    }
+    plotter = _plot_kc
 
     print(f"\n{'=' * 60}")
     print(f"  [{label}]  {tehsil}  |  {year}")
@@ -1332,23 +1305,7 @@ def _run_ratio_application(cfg: dict, region: ee.Geometry, aet_stack=None,
 
 
 # =============================================================================
-# APPLICATION 5 - WATER STRESS
-# =============================================================================
-
-def run_water_stress(cfg: dict, region: ee.Geometry, aet_stack=None,
-                     gap_flags=None, pet_stack=None) -> str:
-    """
-    Water Stress = AET / PET (0-1)
-    Output  : water_stress_<TEHSIL>_<YEAR>.tif  (13 bands)
-    """
-    return _run_ratio_application(
-        cfg, region, aet_stack=aet_stack, gap_flags=gap_flags,
-        pet_stack=pet_stack, mode="water_stress"
-    )
-
-
-# =============================================================================
-# APPLICATION 6 - KC
+# APPLICATION 5 - KC
 # =============================================================================
 
 def run_kc(cfg: dict, region: ee.Geometry, aet_stack=None,
@@ -1357,14 +1314,12 @@ def run_kc(cfg: dict, region: ee.Geometry, aet_stack=None,
     Kc proxy = AET / PET
     Output  : kc_<TEHSIL>_<YEAR>.tif  (13 bands)
     """
-    return _run_ratio_application(
-        cfg, region, aet_stack=aet_stack, gap_flags=gap_flags,
-        pet_stack=pet_stack, mode="kc"
-    )
+    return _run_kc_application(cfg, region, aet_stack=aet_stack,
+                               gap_flags=gap_flags, pet_stack=pet_stack)
 
 
 # =============================================================================
-# APPLICATION 7 - GPP
+# APPLICATION 6 - GPP
 # =============================================================================
 
 def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
@@ -1438,7 +1393,7 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
 
 
 # =============================================================================
-# APPLICATION 8 - WUE
+# APPLICATION 7 - WUE
 # =============================================================================
 
 def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
@@ -1521,7 +1476,7 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
 
 def run_all(cfg: dict, region: ee.Geometry) -> dict:
     """
-    Run all eight applications in ONE combined GEE download.
+    Run all seven applications in ONE combined GEE download.
 
     Pixel consistency guarantee:
       All outputs are derived from a single 61-band image download.
@@ -1635,26 +1590,9 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
     )
     results["rwdi"] = path
 
-    ws_monthly = _apply_2d_mask(mosaic[_WS_SLICE], footprint_mask)
-    ws_annual = _annual_mean_band(ws_monthly)
-    ws_data = np.concatenate([ws_monthly, ws_annual], axis=0)
-    path = os.path.join(outdir, f"water_stress_{tehsil}_{year}.tif")
-    _save_geotiff(
-        ws_data,
-        profile,
-        path,
-        band_names=[f"WaterStress_{abbr}" for abbr in MONTH_ABBR] + ["WaterStress_annual"],
-        metadata={
-            "units": "ratio (0-1)",
-            "formula": "AET / PET",
-            "year": str(year),
-            "tehsil": tehsil,
-            "description": "Water Stress per month + annual mean",
-        },
-    )
-    results["water_stress"] = path
-
-    kc_data = np.concatenate([ws_monthly, ws_annual], axis=0)
+    kc_monthly = _apply_2d_mask(mosaic[_KC_SLICE], footprint_mask)
+    kc_annual = _annual_mean_band(kc_monthly)
+    kc_data = np.concatenate([kc_monthly, kc_annual], axis=0)
     path = os.path.join(outdir, f"kc_{tehsil}_{year}.tif")
     _save_geotiff(
         kc_data,
@@ -1666,10 +1604,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
             "formula": "AET / PET",
             "year": str(year),
             "tehsil": tehsil,
-            "description": (
-                "Monthly Kc proxy from AET/PET + annual mean. "
-                "Numerically identical to water_stress output."
-            ),
+            "description": "Monthly Kc proxy from AET/PET + annual mean",
         },
     )
     results["kc"] = path
@@ -1715,8 +1650,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
 
     _print_stats("Annual ET (mm/yr)", annual_data)
     _print_stats("Annual mean RWDI (%)", rwdi_annual)
-    _print_stats("Annual mean Water Stress (ratio)", ws_annual)
-    _print_stats("Annual mean Kc (AET/PET)", ws_annual)
+    _print_stats("Annual mean Kc (AET/PET)", kc_annual)
     _print_stats("Annual mean GPP (g C/m2/day)", gpp_annual)
     _print_stats("Annual mean WUE (g C/kg H2O)", wue_annual)
 
@@ -1725,8 +1659,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         _plot_annual_et(annual_data, tehsil, year, outdir)
         _plot_pet(pet_data, tehsil, year, outdir)
         _plot_rwdi(rwdi_monthly, tehsil, year, outdir)
-        _plot_water_stress(ws_monthly, tehsil, year, outdir)
-        _plot_kc(ws_monthly, tehsil, year, outdir)
+        _plot_kc(kc_monthly, tehsil, year, outdir)
         _plot_gpp(gpp_monthly, tehsil, year, outdir)
         _plot_wue(wue_monthly, tehsil, year, outdir)
 
@@ -1767,7 +1700,6 @@ def run_sample_timeseries(output_paths: dict, cfg: dict):
     pet = _sample(output_paths.get("pet"))
     rwdi = _sample(output_paths.get("rwdi"))
     kc = _sample(output_paths.get("kc"))
-    ws = _sample(output_paths.get("water_stress"))
     gpp = _sample(output_paths.get("gpp"))
     wue = _sample(output_paths.get("wue"))
 
@@ -1776,8 +1708,7 @@ def run_sample_timeseries(output_paths: dict, cfg: dict):
         return
 
     rwdi_m = rwdi[:12] if rwdi is not None else np.full(12, np.nan)
-    ratio_src = kc if kc is not None else ws
-    kc_m = ratio_src[:12] if ratio_src is not None else np.full(12, np.nan)
+    kc_m = kc[:12] if kc is not None else np.full(12, np.nan)
     pet_m = pet if pet is not None else np.full(12, np.nan)
     gpp_m = gpp[:12] if gpp is not None else np.full(12, np.nan)
     wue_m = wue[:12] if wue is not None else np.full(12, np.nan)
@@ -1938,13 +1869,6 @@ def _plot_ratio(arr, tehsil, year, outdir, prefix, title, filename):
     )
 
 
-def _plot_water_stress(arr, tehsil, year, outdir):
-    _plot_ratio(arr, tehsil, year, outdir,
-                prefix="AET / PET",
-                title="Monthly Water Stress (AET/PET)",
-                filename=f"water_stress_{tehsil}_{year}.png")
-
-
 def _plot_kc(arr, tehsil, year, outdir):
     _plot_ratio(arr, tehsil, year, outdir,
                 prefix="Kc (AET / PET)",
@@ -2070,7 +1994,7 @@ def build_parser():
                              "Lower if you get GEE memory errors.")
     parser.add_argument("--application", default=None,
                         choices=["all", "monthly_et", "annual_et", "pet",
-                                 "rwdi", "water_stress", "kc", "gpp", "wue"],
+                                 "rwdi", "kc", "gpp", "wue"],
                         help="Which application to run (default: all).")
     parser.add_argument("--sample-lon", type=float, default=None,
                         help="Longitude for single-pixel timeseries plot.")
@@ -2124,7 +2048,6 @@ def main():
         "annual_et": lambda: run_annual_et(cfg, region),
         "pet": lambda: run_pet(cfg, region),
         "rwdi": lambda: run_rwdi(cfg, region),
-        "water_stress": lambda: run_water_stress(cfg, region),
         "kc": lambda: run_kc(cfg, region),
         "gpp": lambda: run_gpp(cfg, region),
         "wue": lambda: run_wue(cfg, region),
