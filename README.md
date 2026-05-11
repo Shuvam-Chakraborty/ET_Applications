@@ -29,15 +29,23 @@
 
 ## 1. Project Overview
 
-ET-Applications downscales MODIS-resolution evapotranspiration data to the native 30 m Landsat 8 grid using pre-trained Random Forest models — one model per Agro-Ecological Zone (AEZ) covering all of India. For any selected tehsil, the tool generates **multi-band GeoTIFF rasters** containing:
+ET-Applications downscales MODIS-resolution evapotranspiration data to the native 30 m Landsat 8 grid using pre-trained Random Forest models — one model per Agro-Ecological Zone (AEZ) covering all of India.
 
-- Monthly mean daily Actual Evapotranspiration (AET) — 12 bands
-- Annual total AET — 1 band
-- Monthly mean daily Potential Evapotranspiration (PET) from MODIS MOD16A2 — 12 bands
+The **feature layers collected/calculated** in this workflow are:
+
+- Actual Evapotranspiration (AET) + annual total AET — 13 bands
+- Potential Evapotranspiration (PET) from MODIS MOD16A2 + annual total PET — 13 bands
+- Gross Primary Productivity (GPP) + annual mean — 13 bands
+
+The **derived applications created from those layers** are:
+
 - Relative Water Deficit Index (RWDI) per month + annual mean — 13 bands
 - Crop coefficient proxy Kc (AET/PET) per month + annual mean — 13 bands
-- Gross Primary Productivity (GPP) per month + annual mean — 13 bands
 - Water Use Efficiency (WUE = GPP/AET) per month + annual mean — 13 bands
+
+An optional standalone export is also available:
+
+- Annual total AET (`annual_et` mode only) — 1 band
 
 All output GeoTIFFs share the same CRS, bounding box, and 30 m pixel grid, making them directly overlay-compatible in any GIS environment without reprojection. Derived products are masked to the valid AET footprint so pixel counts remain consistent across outputs. Band descriptions and metadata (units, source, year, gap-fill status) are embedded in every file.
 
@@ -289,7 +297,7 @@ With `config.yaml` set and authentication complete, run the script from the dire
 python3 et_applications.py
 ```
 
-This reads all settings from `config.yaml`. The default `application: "all"` generates all seven output GeoTIFFs in a single 61-band GEE download pass.
+This reads all settings from `config.yaml`. The default `application: "all"` generates the three feature layers plus the three derived applications in a single 60-band GEE download pass.
 
 ### Overriding Config Values from the Command Line
 
@@ -343,28 +351,29 @@ Full list of CLI flags:
 
 ---
 
-## 9. Application Modes and Output Files
+## 9. Output Modes and Output Files
 
 Set `application` in `config.yaml` or use `--application` on the command line.
+The CLI exposes the three feature layers (`monthly_et`, `pet`, `gpp`) and the three derived applications (`rwdi`, `kc`, `wue`). A separate `annual_et` mode remains available only if you explicitly want a standalone 1-band annual AET raster.
 
 | Mode | Output File | Bands | Description |
 |---|---|---|---|
-| `all` | All seven GeoTIFFs | — | Recommended. Builds all stacks once, downloads once in a single 61-band pass. Guarantees pixel-perfect spatial alignment across all outputs. |
-| `monthly_et` | `monthly_et_<TEHSIL>_<YEAR>.tif` | 12 | Monthly mean daily AET (mm/day) |
-| `annual_et` | `annual_et_<TEHSIL>_<YEAR>.tif` | 1 | Annual total AET (mm/yr) |
-| `pet` | `pet_<TEHSIL>_<YEAR>.tif` | 12 | Monthly mean daily PET (mm/day) |
-| `rwdi` | `rwdi_<TEHSIL>_<YEAR>.tif` | 13 | Monthly RWDI (%) + annual mean |
-| `kc` | `kc_<TEHSIL>_<YEAR>.tif` | 13 | Monthly crop coefficient proxy (AET/PET) + annual mean |
-| `gpp` | `gpp_<TEHSIL>_<YEAR>.tif` | 13 | Monthly GPP (g C/m²/day) + annual mean |
-| `wue` | `wue_<TEHSIL>_<YEAR>.tif` | 13 | Monthly WUE (g C/kg H₂O) + annual mean |
+| `all` | All six primary outputs | — | Recommended. Builds the three feature layers once, downloads once in a single 60-band pass, and then writes the three feature layers plus the three derived applications with pixel-perfect spatial alignment. |
+| `monthly_et` | `aet_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Bands 1-12: monthly mean daily AET (mm/day); band 13: annual total AET (mm/yr) |
+| `annual_et` | `annual_et_<TEHSIL>_<YEAR>.tif` | 1 | Optional standalone annual total AET (same quantity as band 13 of `aet_<TEHSIL>_<YEAR>.tif`) |
+| `pet` | `pet_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Bands 1-12: monthly mean daily PET (mm/day); band 13: annual total PET (mm/yr) |
+| `gpp` | `gpp_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Monthly GPP (g C/m²/day) + annual mean |
+| `rwdi` | `rwdi_<TEHSIL>_<YEAR>.tif` | 13 | Derived application. Monthly RWDI (%) + annual mean |
+| `kc` | `kc_<TEHSIL>_<YEAR>.tif` | 13 | Derived application. Monthly crop coefficient proxy (AET/PET) + annual mean |
+| `wue` | `wue_<TEHSIL>_<YEAR>.tif` | 13 | Derived application. Monthly WUE (g C/kg H₂O) + annual mean |
 
-**Plots:** When `plot: true`, each application saves a PNG chart alongside its GeoTIFF in the output directory.
+**Plots:** When `plot: true`, each output saves a PNG chart alongside its GeoTIFF in the output directory. AET is shown as a monthly mean time series; no annual histogram is written.
 
 ---
 
 ## 10. Output GeoTIFF Band Reference
 
-### monthly_et_\<TEHSIL\>_\<YEAR\>.tif — 12 bands
+### aet_\<TEHSIL\>_\<YEAR\>.tif — 13 bands
 
 | Band | Description | Unit |
 |---|---|---|
@@ -372,6 +381,7 @@ Set `application` in `config.yaml` or use `--application` on the command line.
 | 2 | `ET_Feb_daily_mm` — February mean daily AET | mm/day |
 | … | … | … |
 | 12 | `ET_Dec_daily_mm` — December mean daily AET | mm/day |
+| 13 | `ET_annual_mm` — Annual total AET = Σ_m(daily_ET_m × days_m) | mm/yr |
 
 TIFF metadata tag `gap_filled_months` lists any months filled by ±60-day temporal interpolation (e.g., `"Jan,Feb"` or `"none"`).
 
@@ -381,13 +391,14 @@ TIFF metadata tag `gap_filled_months` lists any months filled by ±60-day tempor
 |---|---|---|
 | 1 | `ET_annual_mm` — Annual total AET = Σ_m(daily_ET_m × days_m) | mm/yr |
 
-### pet_\<TEHSIL\>_\<YEAR\>.tif — 12 bands
+### pet_\<TEHSIL\>_\<YEAR\>.tif — 13 bands
 
 | Band | Description | Unit |
 |---|---|---|
 | 1 | `PET_Jan_daily_mm` — January mean daily PET (MODIS MOD16A2) | mm/day |
 | … | … | … |
 | 12 | `PET_Dec_daily_mm` — December mean daily PET | mm/day |
+| 13 | `PET_annual_mm` — Annual total PET = Σ_m(daily_PET_m × days_m) | mm/yr |
 
 Pixels where MODIS has no data are written as NoData (–9999).
 
@@ -536,7 +547,7 @@ Builds a 12-band monthly GPP image at 30 m using a Light Use Efficiency framewor
 Maps MODIS MCD12Q1 land-cover classes to the five parameter layers needed by the GPP model: `eps_max`, `tmin_min`, `tmin_max`, `vpd_min`, and `vpd_max`.
 
 **`build_combined_image(aet_stack, pet_stack, gpp_stack, year)`**  
-Stacks all products into a single 61-band GEE image in this order: AET (12 bands) → PET (12 bands) → Annual ET (1 band) → RWDI (12 bands) → Kc (12 bands) → GPP (12 bands). WUE is computed after download in Python as `GPP / AET`. This allows a single GEE download pass to retrieve all data at once, guaranteeing that every product is derived from the same underlying pixel grid.
+Stacks all products into a single 60-band GEE image in this order: AET (12 bands) → PET (12 bands) → RWDI (12 bands) → Kc (12 bands) → GPP (12 bands). WUE is computed after download in Python as `GPP / AET`, and the saved `aet_<TEHSIL>_<YEAR>.tif` and `pet_<TEHSIL>_<YEAR>.tif` files each append a 13th annual-total band in Python. This allows a single GEE download pass to retrieve all data at once, guaranteeing that every product is derived from the same underlying pixel grid.
 
 ### Download Infrastructure
 
@@ -560,6 +571,9 @@ Multiplies an array by a scale factor (e.g., 0.1 to convert from GEE's internal 
 **`_annual_mean_band(monthly_12, nodata)`**  
 Computes a pixel-wise mean across the 12 monthly bands, ignoring NoData and NaN pixels. Returns a `(1, H, W)` array. Pixels where all 12 months are invalid remain NoData in the output. RuntimeWarning from `np.nanmean` on all-NaN slices is suppressed with `warnings.catch_warnings`.
 
+**`_annual_total_band(monthly_12, year, nodata)`**  
+Computes a pixel-wise annual total from 12 monthly mean-daily bands by multiplying each month by its number of days and summing the result. Returns a `(1, H, W)` array and is used to append band 13 for the saved AET and PET GeoTIFFs.
+
 **`compute_wue_numpy(gpp_monthly, aet_monthly_raw, nodata)`**  
 Computes monthly WUE in Python after download as `GPP / AET`, converting AET from the internal 0.1 mm/day scale to mm/day and assigning NoData where AET is missing or non-positive.
 
@@ -569,31 +583,31 @@ Computes per-band mean and standard deviation across all valid pixels, ignoring 
 **`_print_stats(label, arr, nodata)`**  
 Prints a concise summary (valid pixel count, mean, min, max, std) for an array to the console. Called after saving each GeoTIFF so the user can immediately sanity-check the outputs.
 
-### Application Runners
+### Output Runners
 
 **`run_monthly_et(cfg, region, ...)`**  
-Builds the AET stack (if not already provided), downloads tiles, converts units, and saves `monthly_et_<TEHSIL>_<YEAR>.tif` with 12 monthly bands.
+Builds the AET feature layer (if not already provided), downloads tiles, converts units, appends an annual-total band in Python, and saves `aet_<TEHSIL>_<YEAR>.tif` with 13 bands.
 
 **`run_annual_et(cfg, region, ...)`**  
-Builds the AET stack, computes the annual sum on the GEE server, downloads, converts, and saves `annual_et_<TEHSIL>_<YEAR>.tif` with 1 band.
+Builds the AET stack, computes the annual sum on the GEE server, downloads, converts, and saves `annual_et_<TEHSIL>_<YEAR>.tif` with 1 band. If plotting is enabled, it also writes the monthly mean AET time-series PNG used as the basis for that annual total.
 
 **`run_pet(cfg, region, ...)`**  
-Builds the AET stack (as a pixel-grid carrier) and the PET stack, downloads both together, discards the carrier band, and saves `pet_<TEHSIL>_<YEAR>.tif` with 12 bands.
+Builds the PET feature layer on the AET-aligned pixel grid, appends an annual-total PET band in Python, and saves `pet_<TEHSIL>_<YEAR>.tif` with 13 bands.
 
 **`run_rwdi(cfg, region, ...)`**  
-Builds both stacks, computes RWDI in GEE, downloads, appends a Python-computed annual mean band (band 13), and saves `rwdi_<TEHSIL>_<YEAR>.tif` with 13 bands.
+Builds the RWDI derived application from AET and PET, appends a Python-computed annual mean band (band 13), and saves `rwdi_<TEHSIL>_<YEAR>.tif` with 13 bands.
 
 **`run_kc(cfg, region, ...)`**  
-Builds the monthly Kc proxy from AET/PET, appends a Python-computed annual mean band (band 13), and saves `kc_<TEHSIL>_<YEAR>.tif`.
+Builds the Kc derived application from AET/PET, appends a Python-computed annual mean band (band 13), and saves `kc_<TEHSIL>_<YEAR>.tif`.
 
 **`run_gpp(cfg, region, ...)`**  
-Builds the GPP stack, downloads it on the same Landsat-aligned grid, appends a Python-computed annual mean band (band 13), and saves `gpp_<TEHSIL>_<YEAR>.tif`.
+Builds the GPP feature layer, appends a Python-computed annual mean band (band 13), and saves `gpp_<TEHSIL>_<YEAR>.tif`.
 
 **`run_wue(cfg, region, ...)`**  
-Builds the AET and GPP stacks, downloads both, computes monthly WUE in Python as `GPP/AET`, appends an annual mean band, and saves `wue_<TEHSIL>_<YEAR>.tif`.
+Builds the WUE derived application from AET and GPP, appends an annual mean band, and saves `wue_<TEHSIL>_<YEAR>.tif`.
 
 **`run_all(cfg, region)`**  
-The recommended entry point. Builds AET, PET, and GPP stacks once, assembles the 61-band combined image, performs a single tile download pass, then slices and saves all seven GeoTIFFs from the one mosaic. Guarantees spatial identity across all outputs.
+The recommended entry point. Builds the three feature layers once, assembles the 60-band combined image, performs a single tile download pass, then slices and saves the three feature layers plus the three derived applications from the one mosaic. Guarantees spatial identity across all outputs.
 
 ### Sample Point
 
@@ -605,7 +619,7 @@ If a `sample_point` is configured, reads the pixel nearest to the specified lon/
 | Function | Input shape | Output |
 |---|---|---|
 | `_plot_monthly_et` | (12, H, W) mm/day | Line chart with ±1 std fill |
-| `_plot_annual_et` | (1, H, W) mm/yr | Histogram with mean line |
+| `_plot_annual_et` | (12, H, W) mm/day | Monthly AET line chart for the annual-ET workflow |
 | `_plot_pet` | (12, H, W) mm/day | Line chart with ±1 std fill |
 | `_plot_rwdi` | (12, H, W) % | Monthly line chart with RWDI stress-class background |
 | `_plot_kc` | (12, H, W) ratio | Monthly line chart with threshold lines |
@@ -631,7 +645,7 @@ import rasterio
 import numpy as np
 
 # Open the monthly AET GeoTIFF
-with rasterio.open('results/monthly_et_TELYANI_2022.tif') as ds:
+with rasterio.open('results/aet_TELYANI_2022.tif') as ds:
     print("CRS:", ds.crs)
     print("Transform:", ds.transform)
     print("NoData:", ds.nodata)
@@ -652,18 +666,17 @@ print("Monthly AET means (mm/day):", monthly_means)
 
 ```python
 from osgeo import gdal
-ds = gdal.Open('results/monthly_et_TELYANI_2022.tif')
+ds = gdal.Open('results/aet_TELYANI_2022.tif')
 band = ds.GetRasterBand(1)        # January (1-indexed)
 data = band.ReadAsArray()
 nodata = band.GetNoDataValue()    # -9999.0
 ```
 
-### Stacking all outputs into a single file (GDAL command line)
+### Stacking the six primary outputs into a single file (GDAL command line)
 
 ```bash
 gdal_merge.py -o combined_TELYANI_2022.tif -separate \
-  results/monthly_et_TELYANI_2022.tif \
-  results/annual_et_TELYANI_2022.tif \
+  results/aet_TELYANI_2022.tif \
   results/pet_TELYANI_2022.tif \
   results/rwdi_TELYANI_2022.tif \
   results/kc_TELYANI_2022.tif \
@@ -722,7 +735,7 @@ time:
 python3 et_applications.py
 ```
 
-Output files are named using the tehsil name and year (e.g., `monthly_et_NEWNAME_2022.tif`), so existing results are not overwritten.
+Output files are named using the tehsil name and year (e.g., `aet_NEWNAME_2022.tif`), so existing results are not overwritten.
 
 ---
 
@@ -750,7 +763,7 @@ compute:
   chunk_size: 1000
 ```
 
-Progressively halve the value until the error stops. For large tehsils or the 61-band `all` mode, values as low as `500` may be necessary.
+Progressively halve the value until the error stops. For large tehsils or the 60-band `all` mode, values as low as `500` may be necessary.
 
 **"Asset not found" or "Permission denied"**
 
@@ -770,7 +783,7 @@ Months with no Landsat 8 scenes are gap-filled automatically. Check which months
 
 ```python
 import rasterio
-with rasterio.open('results/monthly_et_TELYANI_2022.tif') as ds:
+with rasterio.open('results/aet_TELYANI_2022.tif') as ds:
     print(ds.tags().get('gap_filled_months'))
 ```
 

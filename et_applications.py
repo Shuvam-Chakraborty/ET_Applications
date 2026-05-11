@@ -2,7 +2,7 @@
 """
 ET-Applications - Pan-India ET Downscaling CLI  (GeoTIFF Raster Edition)
 =========================================================================
-Each application writes its OWN multi-band GeoTIFF (one band per month /
+Each output mode writes its own multi-band GeoTIFF (one band per month /
 derived product). All GeoTIFFs are spatially aligned at 30 m resolution
 and can be opened directly in QGIS, ArcGIS, or any rasterio/GDAL workflow.
 
@@ -19,16 +19,15 @@ and can be opened directly in QGIS, ArcGIS, or any rasterio/GDAL workflow.
   visible without consulting external documentation. Gap-fill status
   and units are stored as TIFF metadata tags.
 
-  Applications
-  ------------
-  monthly_et    ->  monthly_et_<TEHSIL>_<YEAR>.tif    12 bands  (mm/day)
-  annual_et     ->  annual_et_<TEHSIL>_<YEAR>.tif      1 band   (mm/yr)
-  pet           ->  pet_<TEHSIL>_<YEAR>.tif            12 bands  (mm/day)
-  rwdi          ->  rwdi_<TEHSIL>_<YEAR>.tif           13 bands  (%)
-  kc            ->  kc_<TEHSIL>_<YEAR>.tif             13 bands  (ratio)
-  gpp           ->  gpp_<TEHSIL>_<YEAR>.tif            13 bands  (g C/m2/day)
-  wue           ->  wue_<TEHSIL>_<YEAR>.tif            13 bands  (g C/kg H2O)
-  all           ->  all seven GeoTIFFs (ONE combined download, stacks built once)
+  Core Layers + Derived Applications
+  ----------------------------------
+  monthly_et    ->  aet_<TEHSIL>_<YEAR>.tif           13 bands  (12 monthly + annual total)
+  pet           ->  pet_<TEHSIL>_<YEAR>.tif            13 bands  (12 monthly + annual total)
+  gpp           ->  gpp_<TEHSIL>_<YEAR>.tif            13 bands  (12 monthly + annual mean)
+  rwdi          ->  rwdi_<TEHSIL>_<YEAR>.tif           13 bands  (12 monthly + annual mean)
+  kc            ->  kc_<TEHSIL>_<YEAR>.tif             13 bands  (12 monthly + annual mean)
+  wue           ->  wue_<TEHSIL>_<YEAR>.tif            13 bands  (12 monthly + annual mean)
+  all           ->  three feature layers + three derived applications
 
   GPP Method (Light Use Efficiency)
   ----------------------------------
@@ -168,15 +167,14 @@ _BPLUT_DEFAULT_CLASS = 10
 
 
 # ---------------------------------------------------------------------------
-# BAND LAYOUT - combined 61-band download image for run_all()
+# BAND LAYOUT - combined 60-band download image for run_all()
 # ---------------------------------------------------------------------------
-# AET(12) PET(12) Annual(1) RWDI(12) KC(12) GPP(12)
+# AET(12) PET(12) RWDI(12) KC(12) GPP(12)
 _AET_SLICE = slice(0, 12)       # ET_01 ... ET_12        (0.1 mm/day)
 _PET_SLICE = slice(12, 24)      # PET_01 ... PET_12      (0.1 mm/day)
-_ANNUAL_SLICE = slice(24, 25)   # annual_ET_01mm         (0.1 mm/yr)
-_RWDI_SLICE = slice(25, 37)     # RWDI_01 ... RWDI_12    (%)
-_KC_SLICE = slice(37, 49)       # KC_01 ... KC_12        (ratio 0-1)
-_GPP_SLICE = slice(49, 61)      # GPP_01 ... GPP_12      (g C/m2/day)
+_RWDI_SLICE = slice(24, 36)     # RWDI_01 ... RWDI_12    (%)
+_KC_SLICE = slice(36, 48)       # KC_01 ... KC_12        (ratio 0-1)
+_GPP_SLICE = slice(48, 60)      # GPP_01 ... GPP_12      (g C/m2/day)
 # WUE is derived numpy-side from _GPP_SLICE / (_AET_SLICE x 0.1).
 
 
@@ -626,25 +624,22 @@ def build_kc_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
 def build_combined_image(aet_stack: ee.Image, pet_stack: ee.Image,
                          gpp_stack: ee.Image, year: int) -> ee.Image:
     """
-    Combine all bands into ONE 61-band image for a single-pass download.
+    Combine all bands into ONE 60-band image for a single-pass download.
 
     Band layout:
         ET_01 ... ET_12          (0.1 mm/day)
         PET_01 ... PET_12        (0.1 mm/day)
-        annual_ET_01mm           (0.1 mm/yr)
         RWDI_01 ... RWDI_12      (%)
         KC_01 ... KC_12          (0-1)
         GPP_01 ... GPP_12        (g C/m2/day)
         WUE derived from GPP/AET in Python.
     """
-    annual_img = build_annual_et_image(aet_stack, year)
     rwdi_img = build_rwdi_image(aet_stack, pet_stack)
     kc_img = build_kc_image(aet_stack, pet_stack)
 
     return (
         aet_stack
         .addBands(pet_stack.unmask(NODATA))
-        .addBands(annual_img)
         .addBands(rwdi_img.unmask(NODATA))
         .addBands(kc_img.unmask(NODATA))
         .addBands(gpp_stack.unmask(NODATA))
@@ -937,6 +932,24 @@ def _annual_mean_band(monthly_12: np.ndarray, nodata: float = NODATA) -> np.ndar
     return annual[np.newaxis, :]
 
 
+def _annual_total_band(monthly_12: np.ndarray, year: int,
+                       nodata: float = NODATA) -> np.ndarray:
+    """
+    Compute pixel-wise annual total from 12 monthly mean-daily bands.
+    shape in: (12, H, W) -> shape out: (1, H, W)
+    """
+    days = np.array(
+        [calendar.monthrange(year, month)[1] for month in range(1, 13)],
+        dtype=np.float32,
+    )[:, np.newaxis, np.newaxis]
+    bad = (monthly_12 == nodata) | np.isnan(monthly_12) | np.isinf(monthly_12)
+    valid = np.where(bad, np.nan, monthly_12.astype(np.float64))
+    annual = np.nansum(valid * days, axis=0)
+    all_bad = np.all(np.isnan(valid), axis=0)
+    annual = np.where(all_bad, nodata, annual).astype(np.float32)
+    return annual[np.newaxis, :]
+
+
 # =============================================================================
 # UTILITIES
 # =============================================================================
@@ -992,15 +1005,15 @@ def _apply_2d_mask(arr: np.ndarray, valid_mask: np.ndarray,
 
 
 # =============================================================================
-# APPLICATION 1 - MONTHLY AET
+# CORE LAYER 1 - AET
 # =============================================================================
 
 def run_monthly_et(cfg: dict, region: ee.Geometry,
                    aet_stack=None, gap_flags=None) -> str:
     """
     Monthly mean daily AET for every 30 m pixel.
-    Output  : monthly_et_<TEHSIL>_<YEAR>.tif  (12 bands, mm/day)
-    Bands   : ET_Jan_daily_mm ... ET_Dec_daily_mm
+    Output  : aet_<TEHSIL>_<YEAR>.tif  (13 bands)
+    Bands   : ET_Jan_daily_mm ... ET_Dec_daily_mm, ET_annual_mm
     """
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
@@ -1008,7 +1021,7 @@ def run_monthly_et(cfg: dict, region: ee.Geometry,
     chunk_size = cfg.get("chunk_size", 25000)
 
     print(f"\n{'=' * 60}")
-    print(f"  [monthly_et]  {tehsil}  |  {year}")
+    print(f"  [aet]  {tehsil}  |  {year}")
     print(f"{'=' * 60}")
 
     if aet_stack is None:
@@ -1024,24 +1037,27 @@ def run_monthly_et(cfg: dict, region: ee.Geometry,
         return None
 
     et_data = _scale_nodata(mosaic, scale=0.1)
-    band_names = [f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR]
+    annual_et = _annual_total_band(et_data, year)
+    aet_data = np.concatenate([et_data, annual_et], axis=0)
+    band_names = [f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"]
     gap_months = [MONTH_ABBR[i] for i, gap in enumerate(gap_flags or []) if gap]
 
-    out_path = os.path.join(outdir, f"monthly_et_{tehsil}_{year}.tif")
+    out_path = os.path.join(outdir, f"aet_{tehsil}_{year}.tif")
     _save_geotiff(
-        et_data,
+        aet_data,
         profile,
         out_path,
         band_names=band_names,
         metadata={
-            "units": "mm/day",
+            "units": "bands 1-12: mm/day; band 13: mm/yr",
             "year": str(year),
             "tehsil": tehsil,
             "gap_filled_months": ",".join(gap_months) or "none",
-            "description": "Mean daily AET per month at 30 m",
+            "description": "Bands 1-12: mean daily AET per month at 30 m; band 13: annual total AET",
         },
     )
     _print_stats("Monthly AET (mm/day) - all months / all pixels", et_data)
+    _print_stats("Annual ET (mm/yr)", annual_et)
 
     if cfg.get("plot"):
         _plot_monthly_et(et_data, tehsil, year, outdir)
@@ -1050,7 +1066,7 @@ def run_monthly_et(cfg: dict, region: ee.Geometry,
 
 
 # =============================================================================
-# APPLICATION 2 - ANNUAL ET
+# OPTIONAL STANDALONE EXPORT - ANNUAL ET
 # =============================================================================
 
 def run_annual_et(cfg: dict, region: ee.Geometry,
@@ -1077,13 +1093,24 @@ def run_annual_et(cfg: dict, region: ee.Geometry,
 
     annual_img = build_annual_et_image(aet_stack, year)
 
-    print("  Downloading pixel data (annual ET, 1 band) ...")
-    tile_paths = _download_image_as_geotiff(annual_img, region, chunk_size, "annual_et")
+    plot_monthly_et = None
+    download_img = annual_img
+    if cfg.get("plot"):
+        download_img = aet_stack.addBands(annual_img)
+        print("  Downloading pixel data (AET stack + annual ET, 13 bands) ...")
+    else:
+        print("  Downloading pixel data (annual ET, 1 band) ...")
+
+    tile_paths = _download_image_as_geotiff(download_img, region, chunk_size, "annual_et")
     mosaic, profile = _merge_tiles(tile_paths)
     if mosaic is None:
         return None
 
-    et_annual = _scale_nodata(mosaic, scale=0.1)
+    if cfg.get("plot"):
+        plot_monthly_et = _scale_nodata(mosaic[:12], scale=0.1)
+        et_annual = _scale_nodata(mosaic[12:13], scale=0.1)
+    else:
+        et_annual = _scale_nodata(mosaic, scale=0.1)
 
     out_path = os.path.join(outdir, f"annual_et_{tehsil}_{year}.tif")
     _save_geotiff(
@@ -1101,20 +1128,20 @@ def run_annual_et(cfg: dict, region: ee.Geometry,
     _print_stats("Annual ET (mm/yr)", et_annual)
 
     if cfg.get("plot"):
-        _plot_annual_et(et_annual, tehsil, year, outdir)
+        _plot_annual_et(plot_monthly_et, tehsil, year, outdir)
 
     return out_path
 
 
 # =============================================================================
-# APPLICATION 3 - PET
+# CORE LAYER 2 - PET
 # =============================================================================
 
 def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
             gap_flags=None, pet_stack=None) -> str:
     """
     Monthly mean daily PET (MODIS MOD16A2) for every 30 m pixel.
-    Output  : pet_<TEHSIL>_<YEAR>.tif  (12 bands, mm/day)
+    Output  : pet_<TEHSIL>_<YEAR>.tif  (13 bands)
     """
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
@@ -1147,33 +1174,36 @@ def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
         return None
 
     footprint_mask = _make_valid_mask_2d(mosaic[0])
-    pet_data = _apply_2d_mask(_scale_nodata(mosaic[1:], scale=0.1), footprint_mask)
-    band_names = [f"PET_{abbr}_daily_mm" for abbr in MONTH_ABBR]
+    pet_monthly = _apply_2d_mask(_scale_nodata(mosaic[1:], scale=0.1), footprint_mask)
+    pet_annual = _annual_total_band(pet_monthly, year)
+    pet_data = np.concatenate([pet_monthly, pet_annual], axis=0)
+    band_names = [f"PET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["PET_annual_mm"]
 
     out_path = os.path.join(outdir, f"pet_{tehsil}_{year}.tif")
-    profile.update({"count": 12})
     _save_geotiff(
         pet_data,
         profile,
         out_path,
         band_names=band_names,
         metadata={
-            "units": "mm/day",
+            "units": "bands 1-12: mm/day; band 13: mm/yr",
             "source": "MODIS MOD16A2",
             "year": str(year),
             "tehsil": tehsil,
-            "description": "Mean daily PET per month at 30 m (resampled from MODIS)",
+            "description": "Bands 1-12: mean daily PET per month at 30 m; band 13: annual total PET",
         },
     )
+    _print_stats("Monthly PET (mm/day) - all months / all pixels", pet_monthly)
+    _print_stats("Annual PET (mm/yr)", pet_annual)
 
     if cfg.get("plot"):
-        _plot_pet(pet_data, tehsil, year, outdir)
+        _plot_pet(pet_monthly, tehsil, year, outdir)
 
     return out_path
 
 
 # =============================================================================
-# APPLICATION 4 - RWDI
+# DERIVED APPLICATION 1 - RWDI
 # =============================================================================
 
 def run_rwdi(cfg: dict, region: ee.Geometry, aet_stack=None,
@@ -1305,7 +1335,7 @@ def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
 
 
 # =============================================================================
-# APPLICATION 5 - KC
+# DERIVED APPLICATION 2 - KC
 # =============================================================================
 
 def run_kc(cfg: dict, region: ee.Geometry, aet_stack=None,
@@ -1319,7 +1349,7 @@ def run_kc(cfg: dict, region: ee.Geometry, aet_stack=None,
 
 
 # =============================================================================
-# APPLICATION 6 - GPP
+# CORE LAYER 3 - GPP
 # =============================================================================
 
 def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
@@ -1393,7 +1423,7 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
 
 
 # =============================================================================
-# APPLICATION 7 - WUE
+# DERIVED APPLICATION 3 - WUE
 # =============================================================================
 
 def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
@@ -1476,10 +1506,11 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
 
 def run_all(cfg: dict, region: ee.Geometry) -> dict:
     """
-    Run all seven applications in ONE combined GEE download.
+    Run the three feature layers and three derived applications
+    in ONE combined GEE download.
 
     Pixel consistency guarantee:
-      All outputs are derived from a single 61-band image download.
+      All outputs are derived from a single 60-band image download.
       They are therefore spatially identical - same CRS, transform, and
       pixel grid. No post-processing alignment is needed.
     """
@@ -1505,10 +1536,10 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
     print("\n  [3/3] Building GPP stack (LUE: GLDAS + Landsat NDVI + MCD12Q1) ...")
     gpp_stack = build_gpp_stack(region, year, proj)
 
-    print("\n  Building combined image (61 bands) ...")
+    print("\n  Building combined image (60 bands) ...")
     combined = build_combined_image(aet_stack, pet_stack, gpp_stack, year)
 
-    print("\n  Downloading all bands in ONE pass (61 bands) ...")
+    print("\n  Downloading all bands in ONE pass (60 bands) ...")
     tile_paths = _download_image_as_geotiff(combined, region, chunk_size, "all")
     mosaic, profile = _merge_tiles(tile_paths)
 
@@ -1520,53 +1551,42 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
     gap_meta = ",".join(gap_months) or "none"
     results = {}
 
-    et_data = _scale_nodata(mosaic[_AET_SLICE], scale=0.1)
-    footprint_mask = _make_valid_mask_2d(et_data[0])
-    path = os.path.join(outdir, f"monthly_et_{tehsil}_{year}.tif")
+    et_monthly = _scale_nodata(mosaic[_AET_SLICE], scale=0.1)
+    footprint_mask = _make_valid_mask_2d(et_monthly[0])
+    annual_data = _apply_2d_mask(_annual_total_band(et_monthly, year), footprint_mask)
+    et_data = np.concatenate([et_monthly, annual_data], axis=0)
+    path = os.path.join(outdir, f"aet_{tehsil}_{year}.tif")
     _save_geotiff(
         et_data,
         profile,
         path,
-        band_names=[f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR],
+        band_names=[f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"],
         metadata={
-            "units": "mm/day",
+            "units": "bands 1-12: mm/day; band 13: mm/yr",
             "year": str(year),
             "tehsil": tehsil,
             "gap_filled_months": gap_meta,
-            "description": "Mean daily AET per month at 30 m",
+            "description": "Bands 1-12: mean daily AET per month at 30 m; band 13: annual total AET",
         },
     )
+    results["aet"] = path
     results["monthly_et"] = path
 
-    annual_data = _apply_2d_mask(_scale_nodata(mosaic[_ANNUAL_SLICE], scale=0.1), footprint_mask)
-    path = os.path.join(outdir, f"annual_et_{tehsil}_{year}.tif")
-    _save_geotiff(
-        annual_data,
-        profile,
-        path,
-        band_names=["ET_annual_mm"],
-        metadata={
-            "units": "mm/yr",
-            "year": str(year),
-            "tehsil": tehsil,
-            "description": "Annual total AET at 30 m",
-        },
-    )
-    results["annual_et"] = path
-
-    pet_data = _apply_2d_mask(_scale_nodata(mosaic[_PET_SLICE], scale=0.1), footprint_mask)
+    pet_monthly = _apply_2d_mask(_scale_nodata(mosaic[_PET_SLICE], scale=0.1), footprint_mask)
+    pet_annual = _annual_total_band(pet_monthly, year)
+    pet_data = np.concatenate([pet_monthly, pet_annual], axis=0)
     path = os.path.join(outdir, f"pet_{tehsil}_{year}.tif")
     _save_geotiff(
         pet_data,
         profile,
         path,
-        band_names=[f"PET_{abbr}_daily_mm" for abbr in MONTH_ABBR],
+        band_names=[f"PET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["PET_annual_mm"],
         metadata={
-            "units": "mm/day",
+            "units": "bands 1-12: mm/day; band 13: mm/yr",
             "source": "MODIS MOD16A2",
             "year": str(year),
             "tehsil": tehsil,
-            "description": "Mean daily PET per month at 30 m",
+            "description": "Bands 1-12: mean daily PET per month at 30 m; band 13: annual total PET",
         },
     )
     results["pet"] = path
@@ -1649,15 +1669,15 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
     results["wue"] = path
 
     _print_stats("Annual ET (mm/yr)", annual_data)
+    _print_stats("Annual PET (mm/yr)", pet_annual)
     _print_stats("Annual mean RWDI (%)", rwdi_annual)
     _print_stats("Annual mean Kc (AET/PET)", kc_annual)
     _print_stats("Annual mean GPP (g C/m2/day)", gpp_annual)
     _print_stats("Annual mean WUE (g C/kg H2O)", wue_annual)
 
     if cfg.get("plot"):
-        _plot_monthly_et(et_data, tehsil, year, outdir)
-        _plot_annual_et(annual_data, tehsil, year, outdir)
-        _plot_pet(pet_data, tehsil, year, outdir)
+        _plot_monthly_et(et_monthly, tehsil, year, outdir)
+        _plot_pet(pet_monthly, tehsil, year, outdir)
         _plot_rwdi(rwdi_monthly, tehsil, year, outdir)
         _plot_kc(kc_monthly, tehsil, year, outdir)
         _plot_gpp(gpp_monthly, tehsil, year, outdir)
@@ -1696,7 +1716,7 @@ def run_sample_timeseries(output_paths: dict, cfg: dict):
             vals[vals == NODATA] = np.nan
         return vals
 
-    aet = _sample(output_paths.get("monthly_et"))
+    aet = _sample(output_paths.get("aet") or output_paths.get("monthly_et"))
     pet = _sample(output_paths.get("pet"))
     rwdi = _sample(output_paths.get("rwdi"))
     kc = _sample(output_paths.get("kc"))
@@ -1704,17 +1724,18 @@ def run_sample_timeseries(output_paths: dict, cfg: dict):
     wue = _sample(output_paths.get("wue"))
 
     if aet is None:
-        print("  [sample] monthly_et GeoTIFF not available - skipping.")
+        print("  [sample] AET GeoTIFF not available - skipping.")
         return
 
+    aet_m = aet[:12] if aet is not None else np.full(12, np.nan)
     rwdi_m = rwdi[:12] if rwdi is not None else np.full(12, np.nan)
     kc_m = kc[:12] if kc is not None else np.full(12, np.nan)
-    pet_m = pet if pet is not None else np.full(12, np.nan)
+    pet_m = pet[:12] if pet is not None else np.full(12, np.nan)
     gpp_m = gpp[:12] if gpp is not None else np.full(12, np.nan)
     wue_m = wue[:12] if wue is not None else np.full(12, np.nan)
 
     if cfg.get("plot"):
-        _plot_sample_timeseries(aet, pet_m, rwdi_m, kc_m, gpp_m, wue_m,
+        _plot_sample_timeseries(aet_m, pet_m, rwdi_m, kc_m, gpp_m, wue_m,
                                 lon, lat, tehsil, year, outdir)
 
 
@@ -1783,7 +1804,7 @@ def _plot_monthly_series(arr, tehsil, year, outdir, *,
 def _plot_monthly_et(arr, tehsil, year, outdir):
     _plot_monthly_series(
         arr, tehsil, year, outdir,
-        filename=f"monthly_et_{tehsil}_{year}.png",
+        filename=f"aet_{tehsil}_{year}.png",
         title="Monthly Mean Daily AET",
         ylabel="AET (mm/day)",
         theme_key="aet",
@@ -1792,30 +1813,14 @@ def _plot_monthly_et(arr, tehsil, year, outdir):
 
 
 def _plot_annual_et(arr, tehsil, year, outdir):
-    if not HAS_MPL:
-        return
-    os.makedirs(outdir, exist_ok=True)
-    values = arr[0]
-    good = ~((values == NODATA) | np.isnan(values) | np.isinf(values))
-    valid = values[good]
-    if valid.size == 0:
-        return
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.hist(valid, bins=60, color="#228B22", edgecolor="white", linewidth=0.4)
-    mean_val = np.mean(valid)
-    ax.axvline(mean_val, color="red", linestyle="--", linewidth=1.5,
-               label=f"Mean = {mean_val:.1f} mm/yr")
-    ax.set_title(f"Annual ET Distribution - {tehsil} ({year})",
-                 fontsize=13, fontweight="bold")
-    ax.set_xlabel("Annual ET (mm/yr)")
-    ax.set_ylabel("Pixel count")
-    ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.4)
-    plt.tight_layout()
-    path = os.path.join(outdir, f"annual_et_hist_{tehsil}_{year}.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Plot -> {path}")
+    _plot_monthly_series(
+        arr, tehsil, year, outdir,
+        filename=f"annual_et_{tehsil}_{year}.png",
+        title="Monthly Mean Daily AET (basis for Annual ET)",
+        ylabel="AET (mm/day)",
+        theme_key="aet",
+        marker="o",
+    )
 
 
 def _plot_pet(arr, tehsil, year, outdir):
@@ -1995,7 +2000,7 @@ def build_parser():
     parser.add_argument("--application", default=None,
                         choices=["all", "monthly_et", "annual_et", "pet",
                                  "rwdi", "kc", "gpp", "wue"],
-                        help="Which application to run (default: all).")
+                        help="Which output mode to run (default: all).")
     parser.add_argument("--sample-lon", type=float, default=None,
                         help="Longitude for single-pixel timeseries plot.")
     parser.add_argument("--sample-lat", type=float, default=None,
