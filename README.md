@@ -70,23 +70,23 @@ ET_Applications/
 **Workflow at a glance:**
 
 ```text
-GEE Code Editor                         Local Machine
--------------------------               ------------------------------
+        GEE Code Editor                                    Local Machine
+-------------------------------                   -------------------------------
 1_Check_Tehsil.js
         |
-2_Generate_Tehsil_Boundary.js -> GEE tehsil asset created
+2_Generate_Tehsil_Boundary.js
         |
-        `-> copy tehsil asset path into config.yaml
-                                         |
-                                 python3 et_applications.py
-                                         |
-                                 results/ GeoTIFF + PNG files
-                                         |
-                                 upload GeoTIFFs to GEE assets
-                                         |
-                                 open gee_visualizers/*.js
-                                         |
-                                 visualize monthly bands and band 13 in GEE
+GEE tehsil asset created
+        |----------------------------------> copy tehsil asset path into config.yaml
+                                                                  |
+                                                    python3 et_applications.py
+                                                                  |
+                                                   results/ GeoTIFF + PNG files
+upload GeoTIFFs to GEE assets <-----------------------------------|
+        |
+open gee_visualizers/*.js
+        |
+visualize different bands in GEE
 ```
 
 ---
@@ -247,18 +247,18 @@ earthengine authenticate --auth_mode=localhost
 ### 7.3 Set the Active GEE Cloud Project
 
 ```bash
-earthengine set_project shuvamdownscalinget
+earthengine set_project <your-project-id>
 ```
 
-Replace `shuvamdownscalinget` with your own GEE Cloud Project ID.
+Replace `<your-project-id>` with your own GEE Cloud Project ID.
 
 ### 7.4 Verify Authentication
 
 ```bash
-python3 -c "import ee; ee.Initialize(project='your-project-id'); print('EE authenticated OK')"
+python3 -c "import ee; ee.Initialize(project='<your-project-id>'); print('EE authenticated OK')"
 ```
 
-Replace `your-project-id` with your actual GEE Cloud Project ID.
+Replace `<your-project-id>` with your actual GEE Cloud Project ID.
 
 ---
 
@@ -363,7 +363,7 @@ TIFF metadata tag `gap_filled_months` lists any months filled by plus/minus 60-d
 | 1 | `PET_Jan_daily_mm` - January mean daily PET | mm/day |
 | ... | ... | ... |
 | 12 | `PET_Dec_daily_mm` - December mean daily PET | mm/day |
-| 13 | `PET_annual_mm` - Annual total PET = sum(monthly daily PET x days in month) | mm/yr |
+| 13 | `PET_annual_mm` - Pixel-wise annual total PET = sum(monthly daily PET x days in month) | mm/yr |
 
 ### `rwdi_<TEHSIL>_<YEAR>.tif` - 13 bands
 
@@ -441,9 +441,6 @@ The downscaling pipeline uses one Random Forest model per Agro-Ecological Zone (
 | AEZ 17 | `projects/shuvamdownscalinget/assets/rf_aez17_final` |
 | AEZ 18 | `projects/shuvamdownscalinget/assets/rf_aez18_final` |
 | AEZ 19 | `projects/shuvamdownscalinget/assets/rf_aez19_final` |
-
-India block boundaries used by the setup scripts:  
-https://code.earthengine.google.com/?asset=users/mtpictd/india_block_boundaries
 
 For full details on model training, input features, validation results, and AEZ delineation, see:  
 **https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration**
