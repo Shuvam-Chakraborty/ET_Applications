@@ -59,7 +59,7 @@ compute:
 # -----------------------------------------------------------------------------
 # Options:
 #   all          - core layers (AET, PET, GPP) + derived applications (RWDI, Kc, WUE)
-#   monthly_et   - core AET layer: monthly AET + annual total AET GeoTIFF
+#   aet          - core AET layer: monthly AET + annual total AET GeoTIFF
 #   pet          - core PET layer: monthly PET + annual total PET GeoTIFF (MODIS)
 #   gpp          - core GPP layer (LUE) + annual mean GeoTIFF
 #   rwdi         - derived application: monthly RWDI + annual mean GeoTIFF

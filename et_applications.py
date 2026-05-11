@@ -21,7 +21,7 @@ and can be opened directly in QGIS, ArcGIS, or any rasterio/GDAL workflow.
 
   Core Layers + Derived Applications
   ----------------------------------
-  monthly_et    ->  aet_<TEHSIL>_<YEAR>.tif           13 bands  (12 monthly + annual total)
+  aet           ->  aet_<TEHSIL>_<YEAR>.tif           13 bands  (12 monthly + annual total)
   pet           ->  pet_<TEHSIL>_<YEAR>.tif            13 bands  (12 monthly + annual total)
   gpp           ->  gpp_<TEHSIL>_<YEAR>.tif            13 bands  (12 monthly + annual mean)
   rwdi          ->  rwdi_<TEHSIL>_<YEAR>.tif           13 bands  (12 monthly + annual mean)
@@ -45,7 +45,7 @@ and can be opened directly in QGIS, ArcGIS, or any rasterio/GDAL workflow.
   Quick-start
   -----------
   python3 et_applications.py                          # all from config.yaml
-  python3 et_applications.py --application monthly_et
+  python3 et_applications.py --application aet
   python3 et_applications.py --application kc
   python3 et_applications.py --application gpp
   python3 et_applications.py --application wue
@@ -999,8 +999,8 @@ def _apply_2d_mask(arr: np.ndarray, valid_mask: np.ndarray,
 # CORE LAYER 1 - AET
 # =============================================================================
 
-def run_monthly_et(cfg: dict, region: ee.Geometry,
-                   aet_stack=None, gap_flags=None) -> str:
+def run_aet(cfg: dict, region: ee.Geometry,
+            aet_stack=None, gap_flags=None) -> str:
     """
     Monthly mean daily AET for every 30 m pixel.
     Output  : aet_<TEHSIL>_<YEAR>.tif  (13 bands)
@@ -1022,14 +1022,14 @@ def run_monthly_et(cfg: dict, region: ee.Geometry,
         aet_stack, gap_flags = build_aet_stack(region, classifier, year)
 
     print("  Downloading pixel data (AET stack, 12 bands) ...")
-    tile_paths = _download_image_as_geotiff(aet_stack, region, chunk_size, "monthly_et")
+    tile_paths = _download_image_as_geotiff(aet_stack, region, chunk_size, "aet")
     mosaic, profile = _merge_tiles(tile_paths)
     if mosaic is None:
         return None
 
     et_data = _scale_nodata(mosaic, scale=0.1)
-    annual_et = _annual_total_band(et_data, year)
-    aet_data = np.concatenate([et_data, annual_et], axis=0)
+    aet_annual_total = _annual_total_band(et_data, year)
+    aet_data = np.concatenate([et_data, aet_annual_total], axis=0)
     band_names = [f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"]
     gap_months = [MONTH_ABBR[i] for i, gap in enumerate(gap_flags or []) if gap]
 
@@ -1048,10 +1048,10 @@ def run_monthly_et(cfg: dict, region: ee.Geometry,
         },
     )
     _print_stats("Monthly AET (mm/day) - all months / all pixels", et_data)
-    _print_stats("Annual ET (mm/yr)", annual_et)
+    _print_stats("Annual ET (mm/yr)", aet_annual_total)
 
     if cfg.get("plot"):
-        _plot_monthly_et(et_data, tehsil, year, outdir)
+        _plot_aet(et_data, tehsil, year, outdir)
 
     return out_path
 
@@ -1493,8 +1493,6 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         },
     )
     results["aet"] = path
-    results["monthly_et"] = path
-
     pet_monthly = _apply_2d_mask(_scale_nodata(mosaic[_PET_SLICE], scale=0.1), footprint_mask)
     pet_annual = _annual_total_band(pet_monthly, year)
     pet_data = np.concatenate([pet_monthly, pet_annual], axis=0)
@@ -1599,7 +1597,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
     _print_stats("Annual mean WUE (g C/kg H2O)", wue_annual)
 
     if cfg.get("plot"):
-        _plot_monthly_et(et_monthly, tehsil, year, outdir)
+        _plot_aet(et_monthly, tehsil, year, outdir)
         _plot_pet(pet_monthly, tehsil, year, outdir)
         _plot_rwdi(rwdi_monthly, tehsil, year, outdir)
         _plot_kc(kc_monthly, tehsil, year, outdir)
@@ -1639,7 +1637,7 @@ def run_sample_timeseries(output_paths: dict, cfg: dict):
             vals[vals == NODATA] = np.nan
         return vals
 
-    aet = _sample(output_paths.get("aet") or output_paths.get("monthly_et"))
+    aet = _sample(output_paths.get("aet"))
     pet = _sample(output_paths.get("pet"))
     rwdi = _sample(output_paths.get("rwdi"))
     kc = _sample(output_paths.get("kc"))
@@ -1724,7 +1722,7 @@ def _plot_monthly_series(arr, tehsil, year, outdir, *,
     print(f"  Plot -> {path}")
 
 
-def _plot_monthly_et(arr, tehsil, year, outdir):
+def _plot_aet(arr, tehsil, year, outdir):
     _plot_monthly_series(
         arr, tehsil, year, outdir,
         filename=f"aet_{tehsil}_{year}.png",
@@ -1910,7 +1908,7 @@ def build_parser():
                         help="Approx pixels per download tile (default: 25000). "
                              "Lower if you get GEE memory errors.")
     parser.add_argument("--application", default=None,
-                        choices=["all", "monthly_et", "pet",
+                        choices=["all", "aet", "pet",
                                  "rwdi", "kc", "gpp", "wue"],
                         help="Which output mode to run (default: all).")
     parser.add_argument("--sample-lon", type=float, default=None,
@@ -1943,7 +1941,7 @@ def main():
     for label, key in [
         ("Tehsil", "tehsil_name"),
         ("Year", "year"),
-        ("Application", "application"),
+        ("Output mode", "application"),
         ("Output dir", "output"),
         ("GEE project", "gee_project"),
         ("Model (AEZ)", "model_aez"),
@@ -1961,7 +1959,7 @@ def main():
     _, region = load_tehsil(cfg["tehsil_asset"])
 
     dispatch = {
-        "monthly_et": lambda: run_monthly_et(cfg, region),
+        "aet": lambda: run_aet(cfg, region),
         "pet": lambda: run_pet(cfg, region),
         "rwdi": lambda: run_rwdi(cfg, region),
         "kc": lambda: run_kc(cfg, region),
