@@ -16,14 +16,15 @@
 6. [Step 2 — Configure config.yaml](#6-step-2--configure-configyaml)
 7. [Step 3 — Authenticate Earth Engine in Python](#7-step-3--authenticate-earth-engine-in-python)
 8. [Step 4 — Run the Python Application](#8-step-4--run-the-python-application)
-9. [Application Modes and Output Files](#9-application-modes-and-output-files)
+9. [Output Modes and Output Files](#9-output-modes-and-output-files)
 10. [Output GeoTIFF Band Reference](#10-output-geotiff-band-reference)
 11. [config.yaml Parameter Reference](#11-configyaml-parameter-reference)
 12. [AEZ Model Assets](#12-aez-model-assets)
 13. [Python Function Reference](#13-python-function-reference)
 14. [Working with Output GeoTIFFs](#14-working-with-output-geotiffs)
-15. [Changing to a Different Tehsil](#15-changing-to-a-different-tehsil)
-16. [Troubleshooting](#16-troubleshooting)
+15. [Using the GEE Visualizer Scripts](#15-using-the-gee-visualizer-scripts)
+16. [Changing to a Different Tehsil](#16-changing-to-a-different-tehsil)
+17. [Troubleshooting](#17-troubleshooting)
 
 ---
 
@@ -43,10 +44,6 @@ The **derived applications created from those layers** are:
 - Crop coefficient proxy Kc (AET/PET) per month + annual mean — 13 bands
 - Water Use Efficiency (WUE = GPP/AET) per month + annual mean — 13 bands
 
-An optional standalone export is also available:
-
-- Annual total AET (`annual_et` mode only) — 1 band
-
 All output GeoTIFFs share the same CRS, bounding box, and 30 m pixel grid, making them directly overlay-compatible in any GIS environment without reprojection. Derived products are masked to the valid AET footprint so pixel counts remain consistent across outputs. Band descriptions and metadata (units, source, year, gap-fill status) are embedded in every file.
 
 The Random Forest models and their training data are fully documented and openly available at:  
@@ -63,6 +60,7 @@ et-applications/
 ├── requirements.txt               Python package dependencies
 ├── 1_Check_Tehsil.js              GEE Script 1 — verify tehsil before export
 ├── 2_Generate_Tehsil_Boundary.js  GEE Script 2 — export tehsil asset
+├── gee_visualizers/               Earth Engine viewer scripts for uploaded GeoTIFF assets
 ├── README.md
 └── results/                       Output directory (created automatically)
 ```
@@ -354,13 +352,12 @@ Full list of CLI flags:
 ## 9. Output Modes and Output Files
 
 Set `application` in `config.yaml` or use `--application` on the command line.
-The CLI exposes the three feature layers (`monthly_et`, `pet`, `gpp`) and the three derived applications (`rwdi`, `kc`, `wue`). A separate `annual_et` mode remains available only if you explicitly want a standalone 1-band annual AET raster.
+The CLI exposes the three feature layers (`monthly_et`, `pet`, `gpp`) and the three derived applications (`rwdi`, `kc`, `wue`).
 
 | Mode | Output File | Bands | Description |
 |---|---|---|---|
 | `all` | All six primary outputs | — | Recommended. Builds the three feature layers once, downloads once in a single 60-band pass, and then writes the three feature layers plus the three derived applications with pixel-perfect spatial alignment. |
 | `monthly_et` | `aet_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Bands 1-12: monthly mean daily AET (mm/day); band 13: annual total AET (mm/yr) |
-| `annual_et` | `annual_et_<TEHSIL>_<YEAR>.tif` | 1 | Optional standalone annual total AET (same quantity as band 13 of `aet_<TEHSIL>_<YEAR>.tif`) |
 | `pet` | `pet_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Bands 1-12: monthly mean daily PET (mm/day); band 13: annual total PET (mm/yr) |
 | `gpp` | `gpp_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Monthly GPP (g C/m²/day) + annual mean |
 | `rwdi` | `rwdi_<TEHSIL>_<YEAR>.tif` | 13 | Derived application. Monthly RWDI (%) + annual mean |
@@ -384,12 +381,6 @@ The CLI exposes the three feature layers (`monthly_et`, `pet`, `gpp`) and the th
 | 13 | `ET_annual_mm` — Annual total AET = Σ_m(daily_ET_m × days_m) | mm/yr |
 
 TIFF metadata tag `gap_filled_months` lists any months filled by ±60-day temporal interpolation (e.g., `"Jan,Feb"` or `"none"`).
-
-### annual_et_\<TEHSIL\>_\<YEAR\>.tif — 1 band
-
-| Band | Description | Unit |
-|---|---|---|
-| 1 | `ET_annual_mm` — Annual total AET = Σ_m(daily_ET_m × days_m) | mm/yr |
 
 ### pet_\<TEHSIL\>_\<YEAR\>.tif — 13 bands
 
@@ -454,7 +445,7 @@ Pixels where MODIS has no data are written as NoData (–9999).
 | `modis` | `collection` | string | MODIS ImageCollection ID (default: `MODIS/061/MOD16A2`) |
 | `time` | `year` | integer | Calendar year to process |
 | `compute` | `chunk_size` | integer | Approx pixels per GEE download tile (default: 25000) |
-| (root) | `application` | string | Mode: `all`, `monthly_et`, `annual_et`, `pet`, `rwdi`, `kc`, `gpp`, `wue` |
+| (root) | `application` | string | Mode: `all`, `monthly_et`, `pet`, `rwdi`, `kc`, `gpp`, `wue` |
 | `output` | `directory` | path | Directory where GeoTIFF and PNG files are written |
 | `output` | `plot` | boolean | Whether to generate matplotlib plots |
 | `sample_point` | `lon` | float | Longitude for single-pixel timeseries plot (optional) |
@@ -531,9 +522,6 @@ Builds a 12-band monthly AET image for the full calendar year. For each month it
 **`build_pet_stack(region, year, modis_col_id, proj)`**  
 Builds a 12-band monthly PET image from MODIS MOD16A2. Each 8-day composite is divided by 8 to get daily rates, monthly composites are averaged, and the 500 m MODIS pixels are bilinearly resampled onto the 30 m Landsat projection so AET and PET share the same pixel grid.
 
-**`build_annual_et_image(aet_stack, year)`**  
-Computes annual total ET by multiplying each monthly mean daily ET band by the number of days in that month and summing all 12. The result is a single-band image in units of 0.1 mm/yr (converted to mm/yr by Python after download).
-
 **`build_rwdi_image(aet_stack, pet_stack)`**  
 Computes RWDI = (1 − AET/PET) × 100 for each of the 12 months. Returns a 12-band image in percent. NoData (–9999) is applied where PET is missing.
 
@@ -588,9 +576,6 @@ Prints a concise summary (valid pixel count, mean, min, max, std) for an array t
 **`run_monthly_et(cfg, region, ...)`**  
 Builds the AET feature layer (if not already provided), downloads tiles, converts units, appends an annual-total band in Python, and saves `aet_<TEHSIL>_<YEAR>.tif` with 13 bands.
 
-**`run_annual_et(cfg, region, ...)`**  
-Builds the AET stack, computes the annual sum on the GEE server, downloads, converts, and saves `annual_et_<TEHSIL>_<YEAR>.tif` with 1 band. If plotting is enabled, it also writes the monthly mean AET time-series PNG used as the basis for that annual total.
-
 **`run_pet(cfg, region, ...)`**  
 Builds the PET feature layer on the AET-aligned pixel grid, appends an annual-total PET band in Python, and saves `pet_<TEHSIL>_<YEAR>.tif` with 13 bands.
 
@@ -619,7 +604,6 @@ If a `sample_point` is configured, reads the pixel nearest to the specified lon/
 | Function | Input shape | Output |
 |---|---|---|
 | `_plot_monthly_et` | (12, H, W) mm/day | Line chart with ±1 std fill |
-| `_plot_annual_et` | (12, H, W) mm/day | Monthly AET line chart for the annual-ET workflow |
 | `_plot_pet` | (12, H, W) mm/day | Line chart with ±1 std fill |
 | `_plot_rwdi` | (12, H, W) % | Monthly line chart with RWDI stress-class background |
 | `_plot_kc` | (12, H, W) ratio | Monthly line chart with threshold lines |
@@ -690,7 +674,23 @@ When you upload a GeoTIFF to GEE as an image asset, GEE renames bands to `b1`, `
 
 ---
 
-## 15. Changing to a Different Tehsil
+## 15. Using the GEE Visualizer Scripts
+
+The `gee_visualizers/` folder contains one Earth Engine Code Editor script per output: `aet`, `pet`, `gpp`, `rwdi`, `kc`, and `wue`.
+
+To use them:
+
+1. Upload the corresponding GeoTIFF from `results/` to your Earth Engine assets.
+2. Open the matching script from `gee_visualizers/` in the GEE Code Editor.
+3. Replace the `ASSET_ID` string at the top of the script with your uploaded asset path.
+4. Run the script.
+5. Use the dropdown in the left panel to switch between the 12 monthly bands and band 13.
+
+For `aet` and `pet`, band 13 is the annual total. For `gpp`, `rwdi`, `kc`, and `wue`, band 13 is the annual mean.
+
+---
+
+## 16. Changing to a Different Tehsil
 
 To process a new tehsil, repeat the following steps. `et_applications.py` does not need to be modified.
 
@@ -739,7 +739,7 @@ Output files are named using the tehsil name and year (e.g., `aet_NEWNAME_2022.t
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 **"No features found" in GEE Script 1**
 

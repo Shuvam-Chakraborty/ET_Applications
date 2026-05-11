@@ -60,7 +60,6 @@ compute:
 # Options:
 #   all          - core layers (AET, PET, GPP) + derived applications (RWDI, Kc, WUE)
 #   monthly_et   - core AET layer: monthly AET + annual total AET GeoTIFF
-#   annual_et    - optional standalone annual total ET GeoTIFF
 #   pet          - core PET layer: monthly PET + annual total PET GeoTIFF (MODIS)
 #   gpp          - core GPP layer (LUE) + annual mean GeoTIFF
 #   rwdi         - derived application: monthly RWDI + annual mean GeoTIFF
@@ -91,7 +90,6 @@ output:
 # File                              Bands  Unit         Description
 # -----------------------------------------------------------------------------
 # aet_<TEHSIL>_<YEAR>.tif           13     mixed        Bands 1-12: mean daily AET; band 13: annual total AET
-# annual_et_<TEHSIL>_<YEAR>.tif      1     mm/yr        Optional standalone annual total AET
 # pet_<TEHSIL>_<YEAR>.tif           13     mixed        Bands 1-12: mean daily PET; band 13: annual total PET
 # rwdi_<TEHSIL>_<YEAR>.tif          13     %            RWDI per month + annual mean
 # kc_<TEHSIL>_<YEAR>.tif            13     ratio        Kc proxy (AET/PET) per month + annual mean

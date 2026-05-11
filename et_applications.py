@@ -577,15 +577,6 @@ def build_pet_stack(region: ee.Geometry, year: int,
     return stack.clip(region)
 
 
-def build_annual_et_image(aet_stack: ee.Image, year: int) -> ee.Image:
-    """annual_ET_01mm = sum_m(daily_ET_m x days_in_month_m)"""
-    annual = aet_stack.select("ET_01").multiply(calendar.monthrange(year, 1)[1])
-    for month in range(2, 13):
-        days = calendar.monthrange(year, month)[1]
-        annual = annual.add(aet_stack.select(f"ET_{month:02d}").multiply(days))
-    return annual.rename("annual_ET_01mm").float()
-
-
 def build_rwdi_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
     """RWDI_01...12 = (1 - AET/PET) x 100 (%)"""
     bands = []
@@ -622,7 +613,7 @@ def build_kc_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
 
 
 def build_combined_image(aet_stack: ee.Image, pet_stack: ee.Image,
-                         gpp_stack: ee.Image, year: int) -> ee.Image:
+                         gpp_stack: ee.Image) -> ee.Image:
     """
     Combine all bands into ONE 60-band image for a single-pass download.
 
@@ -1066,74 +1057,6 @@ def run_monthly_et(cfg: dict, region: ee.Geometry,
 
 
 # =============================================================================
-# OPTIONAL STANDALONE EXPORT - ANNUAL ET
-# =============================================================================
-
-def run_annual_et(cfg: dict, region: ee.Geometry,
-                  aet_stack=None, gap_flags=None) -> str:
-    """
-    Annual total ET for every 30 m pixel.
-    Formula : annual_ET = sum_m(daily_ET_m x days_in_month_m)
-    Output  : annual_et_<TEHSIL>_<YEAR>.tif  (1 band, mm/yr)
-    """
-    tehsil = cfg["tehsil_name"]
-    year = cfg["year"]
-    outdir = cfg["output"]
-    chunk_size = cfg.get("chunk_size", 25000)
-
-    print(f"\n{'=' * 60}")
-    print(f"  [annual_et]  {tehsil}  |  {year}")
-    print(f"{'=' * 60}")
-
-    if aet_stack is None:
-        print("  Building AET stack ...")
-        classifier = build_classifier(cfg["model_aez"])
-        _check_landsat(region, year)
-        aet_stack, gap_flags = build_aet_stack(region, classifier, year)
-
-    annual_img = build_annual_et_image(aet_stack, year)
-
-    plot_monthly_et = None
-    download_img = annual_img
-    if cfg.get("plot"):
-        download_img = aet_stack.addBands(annual_img)
-        print("  Downloading pixel data (AET stack + annual ET, 13 bands) ...")
-    else:
-        print("  Downloading pixel data (annual ET, 1 band) ...")
-
-    tile_paths = _download_image_as_geotiff(download_img, region, chunk_size, "annual_et")
-    mosaic, profile = _merge_tiles(tile_paths)
-    if mosaic is None:
-        return None
-
-    if cfg.get("plot"):
-        plot_monthly_et = _scale_nodata(mosaic[:12], scale=0.1)
-        et_annual = _scale_nodata(mosaic[12:13], scale=0.1)
-    else:
-        et_annual = _scale_nodata(mosaic, scale=0.1)
-
-    out_path = os.path.join(outdir, f"annual_et_{tehsil}_{year}.tif")
-    _save_geotiff(
-        et_annual,
-        profile,
-        out_path,
-        band_names=["ET_annual_mm"],
-        metadata={
-            "units": "mm/yr",
-            "year": str(year),
-            "tehsil": tehsil,
-            "description": "Annual total AET at 30 m",
-        },
-    )
-    _print_stats("Annual ET (mm/yr)", et_annual)
-
-    if cfg.get("plot"):
-        _plot_annual_et(plot_monthly_et, tehsil, year, outdir)
-
-    return out_path
-
-
-# =============================================================================
 # CORE LAYER 2 - PET
 # =============================================================================
 
@@ -1537,7 +1460,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
     gpp_stack = build_gpp_stack(region, year, proj)
 
     print("\n  Building combined image (60 bands) ...")
-    combined = build_combined_image(aet_stack, pet_stack, gpp_stack, year)
+    combined = build_combined_image(aet_stack, pet_stack, gpp_stack)
 
     print("\n  Downloading all bands in ONE pass (60 bands) ...")
     tile_paths = _download_image_as_geotiff(combined, region, chunk_size, "all")
@@ -1812,17 +1735,6 @@ def _plot_monthly_et(arr, tehsil, year, outdir):
     )
 
 
-def _plot_annual_et(arr, tehsil, year, outdir):
-    _plot_monthly_series(
-        arr, tehsil, year, outdir,
-        filename=f"annual_et_{tehsil}_{year}.png",
-        title="Monthly Mean Daily AET (basis for Annual ET)",
-        ylabel="AET (mm/day)",
-        theme_key="aet",
-        marker="o",
-    )
-
-
 def _plot_pet(arr, tehsil, year, outdir):
     _plot_monthly_series(
         arr, tehsil, year, outdir,
@@ -1998,7 +1910,7 @@ def build_parser():
                         help="Approx pixels per download tile (default: 25000). "
                              "Lower if you get GEE memory errors.")
     parser.add_argument("--application", default=None,
-                        choices=["all", "monthly_et", "annual_et", "pet",
+                        choices=["all", "monthly_et", "pet",
                                  "rwdi", "kc", "gpp", "wue"],
                         help="Which output mode to run (default: all).")
     parser.add_argument("--sample-lon", type=float, default=None,
@@ -2050,7 +1962,6 @@ def main():
 
     dispatch = {
         "monthly_et": lambda: run_monthly_et(cfg, region),
-        "annual_et": lambda: run_annual_et(cfg, region),
         "pet": lambda: run_pet(cfg, region),
         "rwdi": lambda: run_rwdi(cfg, region),
         "kc": lambda: run_kc(cfg, region),

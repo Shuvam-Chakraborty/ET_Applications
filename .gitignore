@@ -19,9 +19,6 @@ env/
 # Generated outputs
 results/
 
-# Local-only GEE helper scripts
-gee_visualizers/
-
 # Editor / OS files
 .vscode/
 .idea/
