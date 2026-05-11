@@ -1,50 +1,41 @@
-var ASSET_ID = 'projects/your-project/assets/rwdi_TEHSIL_YEAR';
+// ============================================================
+// USER CONFIG
+// ============================================================
+var ASSET_ID     = 'projects/your-project/assets/rwdi_TEHSIL_YEAR';
+var TEHSIL_ASSET = 'projects/<your-project>/assets/tehsil_<state>__<district>__<tehsil>';
+// ============================================================
 
-var MONTH_LABELS = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  'Annual mean'
+var MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Annual mean'];
+var BAND_NAMES   = ['b1','b2','b3','b4','b5','b6','b7','b8','b9','b10','b11','b12','b13'];
+
+// Expanded palette so dark green covers 0-50%, then 10-unit steps per colour
+var PALETTE = [
+  '#228B22','#228B22','#228B22','#228B22','#228B22',  // 0–50%
+  '#9ACD32',                                           // 50–60%
+  '#FFFF00',                                           // 60–70%
+  '#FFA500',                                           // 70–80%
+  '#F08080',                                           // 80–90%
+  '#FF0000','#FF0000'                                  // 90–100%
 ];
-
-var BAND_NAMES = [
-  'b1', 'b2', 'b3', 'b4', 'b5', 'b6',
-  'b7', 'b8', 'b9', 'b10', 'b11', 'b12',
-  'b13'
-];
-
-var VIS = {
-  min: 0,
-  max: 100,
-  palette: ['2166ac', '67a9cf', 'd1e5f0', 'fddbc7', 'ef8a62', 'b2182b']
-};
 
 var rawImage = ee.Image(ASSET_ID);
-var image = rawImage.updateMask(rawImage.neq(-9999));
+var image    = rawImage.updateMask(rawImage.neq(-9999));
+var tehsil   = ee.FeatureCollection(TEHSIL_ASSET);
+
+var stats = image.reduceRegion({ reducer: ee.Reducer.minMax(), geometry: image.geometry(), scale: 30, maxPixels: 1e13, bestEffort: true }).getInfo();
+var minVal = Math.min.apply(null, Object.keys(stats).filter(function(k){ return k.indexOf('_min') > -1; }).map(function(k){ return stats[k]; }));
+var maxVal = Math.max.apply(null, Object.keys(stats).filter(function(k){ return k.indexOf('_max') > -1; }).map(function(k){ return stats[k]; }));
+
+var VIS = { min: minVal, max: maxVal, palette: PALETTE };
 
 Map.setOptions('HYBRID');
-Map.centerObject(image, 9);
+Map.centerObject(image);
 
-var panel = ui.Panel({style: {position: 'top-left', width: '320px', padding: '8px'}});
-panel.add(ui.Label('RWDI GeoTIFF Viewer', {fontWeight: 'bold', fontSize: '16px'}));
-panel.add(ui.Label('Set ASSET_ID, then switch between monthly bands and the annual mean band.'));
-panel.add(ui.Label('Band selection'));
-
-var select = ui.Select({
-  items: MONTH_LABELS,
-  value: MONTH_LABELS[0],
-  onChange: drawLayer
-});
-panel.add(select);
-Map.add(panel);
-
-function drawLayer(label) {
-  var index = MONTH_LABELS.indexOf(label);
-  var layer = ui.Map.Layer(image.select(BAND_NAMES[index]), VIS, 'RWDI - ' + label, true, 1.0);
-  if (Map.layers().length() > 0) {
-    Map.layers().set(0, layer);
-  } else {
-    Map.layers().add(layer);
-  }
+for (var i = 0; i < MONTH_LABELS.length; i++) {
+  Map.addLayer(image.select(BAND_NAMES[i]), VIS, 'RWDI - ' + MONTH_LABELS[i], i === 0);
 }
 
-drawLayer(MONTH_LABELS[0]);
+Map.addLayer(
+  tehsil.style({ color: '#000000', width: 2, fillColor: '00000000' }),
+  {}, 'Tehsil Boundary', true
+);

@@ -591,9 +591,20 @@ Use them as follows:
 1. Generate the GeoTIFF locally with `python3 et_applications.py`.
 2. Upload the required GeoTIFF from `results/` to your Earth Engine assets.
 3. Open the matching script from `gee_visualizers/` in the GEE Code Editor.
-4. Replace the `ASSET_ID` value at the top of the script with your uploaded asset path.
-5. Run the script.
-6. Use the dropdown in the viewer panel to switch between the 12 monthly bands and band 13.
+4. Set the two variables in the `USER CONFIG` block at the top of the script:
+
+```javascript
+var ASSET_ID     = 'projects/<your-project>/assets/<geotiff-asset-name>';
+var TEHSIL_ASSET = 'projects/<your-project>/assets/tehsil_<state>__<district>__<tehsil>';
+```
+
+`ASSET_ID` is the path to the uploaded GeoTIFF asset. `TEHSIL_ASSET` is the same tehsil boundary asset created in Step 1 — its path is already recorded in `config.yaml` under `assets.tehsil_asset`.
+
+5. Click `Run`.
+
+Each of the 13 bands is added as a separate named layer (`AET - Jan`, `AET - Feb`, …, `AET - Annual total`). Use GEE's native **Layers** panel (top-right of the map) to toggle visibility between months. Only the first band (January) is visible on load. The tehsil boundary is drawn as a black outline over all layers.
+
+Colour stretch min/max values are computed automatically from the actual pixel data in the uploaded GeoTIFF — no manual adjustment is needed.
 
 When a GeoTIFF is uploaded to GEE, Earth Engine names the bands `b1` to `b13`. The visualizer scripts are already written to use those band names.
 
