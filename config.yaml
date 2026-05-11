@@ -58,12 +58,11 @@ compute:
 # APPLICATION TO RUN
 # -----------------------------------------------------------------------------
 # Options:
-#   all          - monthly AET, annual ET, PET, RWDI, Water Stress, Kc, GPP, WUE
+#   all          - monthly AET, annual ET, PET, RWDI, Kc, GPP, WUE
 #   monthly_et   - only monthly AET GeoTIFF
 #   annual_et    - annual total ET GeoTIFF
 #   pet          - monthly PET GeoTIFF (MODIS)
 #   rwdi         - monthly RWDI + annual mean GeoTIFF
-#   water_stress - monthly Water Stress + annual mean GeoTIFF
 #   kc           - monthly Kc proxy (AET/PET) + annual mean GeoTIFF
 #   gpp          - monthly GPP (LUE) + annual mean GeoTIFF
 #   wue          - monthly WUE (GPP/AET) + annual mean GeoTIFF
@@ -95,13 +94,11 @@ output:
 # annual_et_<TEHSIL>_<YEAR>.tif      1     mm/yr        Annual total AET
 # pet_<TEHSIL>_<YEAR>.tif           12     mm/day       Mean daily PET per month
 # rwdi_<TEHSIL>_<YEAR>.tif          13     %            RWDI per month + annual mean
-# water_stress_<TEHSIL>_<YEAR>.tif  13     ratio        AET/PET per month + annual mean
 # kc_<TEHSIL>_<YEAR>.tif            13     ratio        Kc proxy (AET/PET) per month + annual mean
 # gpp_<TEHSIL>_<YEAR>.tif           13     g C/m2/day   GPP per month + annual mean
 # wue_<TEHSIL>_<YEAR>.tif           13     g C/kg H2O   WUE per month + annual mean
 #
 # Notes:
-# - `kc` and `water_stress` are numerically identical in this implementation.
 # - Band descriptions are embedded in every GeoTIFF.
 # - NoData value: -9999
 # - All GeoTIFFs produced by one run share the same CRS, transform, and
