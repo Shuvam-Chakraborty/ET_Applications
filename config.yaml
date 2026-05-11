@@ -1,5 +1,5 @@
 # =============================================================================
-#  ET-Applications — User Configuration File  (GeoTIFF Raster Edition)
+#  ET-Applications - User Configuration File  (GeoTIFF Raster Edition)
 #  Generates multi-band GeoTIFF rasters at 30 m resolution for the tehsil.
 #  All output files are spatially aligned and can be opened in QGIS, ArcGIS,
 #  or any GDAL/rasterio-based workflow.
@@ -12,7 +12,7 @@ gee_project: "shuvamdownscalinget"          # Your GEE cloud project ID
 
 # -----------------------------------------------------------------------------
 # TEHSIL IDENTIFICATION
-# (Used for labelling output files only — the actual geometry comes from
+# (Used for labelling output files only - the actual geometry comes from
 #  the GEE asset below.)
 # -----------------------------------------------------------------------------
 tehsil:
@@ -31,7 +31,7 @@ assets:
   model_aez    : "projects/shuvamdownscalinget/assets/rf_aez4_final"
 
 # -----------------------------------------------------------------------------
-# MODIS COLLECTION  (PET source for RWDI and Water Stress)
+# MODIS COLLECTION  (PET source)
 # -----------------------------------------------------------------------------
 modis:
   collection: "MODIS/061/MOD16A2"
@@ -40,7 +40,7 @@ modis:
 # TIME PARAMETERS
 # -----------------------------------------------------------------------------
 time:
-  year : 2022          # Year to process (Landsat 8 scenes + MODIS)
+  year : 2022          # Year to process (Landsat 8 + MODIS + GLDAS + MCD12Q1)
 
 # -----------------------------------------------------------------------------
 # COMPUTATION SETTINGS
@@ -49,20 +49,24 @@ compute:
   # chunk_size: approximate number of 30 m pixels per download tile.
   # The script tiles the bounding box so each GEE getDownloadURL request
   # covers ~chunk_size pixels. Safe default = 25000.
-  # If you get "User memory limit exceeded" errors → lower to 5000 or 1000.
-  # If downloads are very slow → raise to 50000.
+  # If you get "User memory limit exceeded" errors -> lower to 5000 or 1000.
+  # If downloads are very slow -> raise to 50000.
+  # For the larger 61-band "all" mode, smaller values may be needed.
   chunk_size: 3000
 
 # -----------------------------------------------------------------------------
 # APPLICATION TO RUN
 # -----------------------------------------------------------------------------
 # Options:
-#   all          — monthly AET, annual ET, PET, RWDI, Water Stress  (default)
-#   monthly_et   — only monthly AET GeoTIFF
-#   annual_et    — monthly AET + annual total ET GeoTIFF
-#   pet          — monthly PET GeoTIFF (MODIS)
-#   rwdi         — monthly RWDI + annual mean GeoTIFF
-#   water_stress — monthly Water Stress + annual mean GeoTIFF
+#   all          - monthly AET, annual ET, PET, RWDI, Water Stress, Kc, GPP, WUE
+#   monthly_et   - only monthly AET GeoTIFF
+#   annual_et    - annual total ET GeoTIFF
+#   pet          - monthly PET GeoTIFF (MODIS)
+#   rwdi         - monthly RWDI + annual mean GeoTIFF
+#   water_stress - monthly Water Stress + annual mean GeoTIFF
+#   kc           - monthly Kc proxy (AET/PET) + annual mean GeoTIFF
+#   gpp          - monthly GPP (LUE) + annual mean GeoTIFF
+#   wue          - monthly WUE (GPP/AET) + annual mean GeoTIFF
 application: "all"
 
 # -----------------------------------------------------------------------------
@@ -70,11 +74,11 @@ application: "all"
 # -----------------------------------------------------------------------------
 output:
   directory: "./results"     # GeoTIFF and PNG files are written here
-  plot      : true           # Set to false to skip matplotlib plots
+  plot      : true           # Set to false to skip matplotlib charts
 
 # -----------------------------------------------------------------------------
 # OPTIONAL: SAMPLE POINT TIME SERIES
-# If provided, a 4-panel monthly timeseries plot is generated for the
+# If provided, a 6-panel monthly timeseries plot is generated for the
 # pixel nearest to this location. No additional GEE calls are made.
 # -----------------------------------------------------------------------------
 # sample_point:
@@ -85,23 +89,21 @@ output:
 # OUTPUT GEOTIFF REFERENCE
 # =============================================================================
 #
-# File                              Bands  Unit       Description
-# ────────────────────────────────────────────────────────────────────────────
-# monthly_et_<TEHSIL>_<YEAR>.tif    12    mm/day     Mean daily AET per month
-# annual_et_<TEHSIL>_<YEAR>.tif      1    mm/yr      Annual total AET
-# pet_<TEHSIL>_<YEAR>.tif           12    mm/day     Mean daily PET per month
-# rwdi_<TEHSIL>_<YEAR>.tif          13    %          RWDI per month + band 13
-#                                                    = annual mean
-# water_stress_<TEHSIL>_<YEAR>.tif  13    ratio 0-1  AET/PET per month + band
-#                                                    13 = annual mean
+# File                              Bands  Unit         Description
+# -----------------------------------------------------------------------------
+# monthly_et_<TEHSIL>_<YEAR>.tif    12     mm/day       Mean daily AET per month
+# annual_et_<TEHSIL>_<YEAR>.tif      1     mm/yr        Annual total AET
+# pet_<TEHSIL>_<YEAR>.tif           12     mm/day       Mean daily PET per month
+# rwdi_<TEHSIL>_<YEAR>.tif          13     %            RWDI per month + annual mean
+# water_stress_<TEHSIL>_<YEAR>.tif  13     ratio        AET/PET per month + annual mean
+# kc_<TEHSIL>_<YEAR>.tif            13     ratio        Kc proxy (AET/PET) per month + annual mean
+# gpp_<TEHSIL>_<YEAR>.tif           13     g C/m2/day   GPP per month + annual mean
+# wue_<TEHSIL>_<YEAR>.tif           13     g C/kg H2O   WUE per month + annual mean
 #
-# Band descriptions are embedded in every GeoTIFF.
-# Open in QGIS: Layer > Add Layer > Add Raster Layer, then select bands in
-# the Layer Styling panel.
-#
-# NoData value: -9999 (applied to pixels outside the tehsil boundary and to
-# pixels where MODIS PET has no data).
-#
-# All GeoTIFFs produced by one run share the same CRS, transform, and
-# 30 m pixel grid — they can be overlaid without reprojection.
+# Notes:
+# - `kc` and `water_stress` are numerically identical in this implementation.
+# - Band descriptions are embedded in every GeoTIFF.
+# - NoData value: -9999
+# - All GeoTIFFs produced by one run share the same CRS, transform, and
+#   30 m pixel grid - they can be overlaid without reprojection.
 # =============================================================================
