@@ -1,4 +1,4 @@
-# ET-Applications — Pan-India ET Downscaling (GeoTIFF Raster Edition)
+# ET-Applications
 
 **Platform:** Google Earth Engine (GEE) + Python 3.x  
 **Output:** Multi-band GeoTIFF rasters at 30 m resolution for any tehsil in India  
