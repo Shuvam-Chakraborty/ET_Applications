@@ -113,7 +113,7 @@ FEATURE_BANDS = [
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 CONFIG_PATH = pathlib.Path(__file__).parent / "config.yaml"
-MODIS_COL = "MODIS/061/MOD16A2"
+MODIS_COL = "MODIS/061/MOD16A2GF"
 MCD12Q1_COL = "MODIS/061/MCD12Q1"
 
 # NoData sentinel used in GEE images and written to masked pixels in GeoTIFF.

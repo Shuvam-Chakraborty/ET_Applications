@@ -34,7 +34,7 @@ assets:
 # MODIS COLLECTION  (PET source)
 # -----------------------------------------------------------------------------
 modis:
-  collection: "MODIS/061/MOD16A2"
+  collection: "MODIS/061/MOD16A2GF"
 
 # -----------------------------------------------------------------------------
 # TIME PARAMETERS
