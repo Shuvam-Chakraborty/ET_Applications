@@ -376,9 +376,6 @@ Each asset also carries image properties such as band descriptions,
 | 12 | `ET_Dec_daily_mm` - December mean daily AET | mm/day |
 | 13 | `ET_annual_mm` - Annual total AET = sum(monthly daily AET x days in month) | mm/yr |
 
-The image property `gap_filled_months` lists any months filled by plus/minus
-60-day temporal interpolation.
-
 ### `pet_<TEHSIL>_<YEAR>` - 13 bands
 
 | Band | Description | Unit |
@@ -506,7 +503,7 @@ Computes the Landsat-derived spectral indices required by the RF model.
 Builds the feature stack for one Landsat scene and predicts daily ET.
 
 **`build_aet_stack(region, classifier, year)`**  
-Builds the 12-band monthly AET stack and tracks gap-filled months.
+Builds the 12-band monthly AET stack.
 
 **`build_pet_stack(region, year, modis_col_id, proj)`**  
 Builds the 12-band monthly PET stack on the AET-aligned grid.

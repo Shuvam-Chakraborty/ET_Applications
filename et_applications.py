@@ -3,8 +3,8 @@
 ET-Applications - Pan-India ET Downscaling CLI  (GEE Asset Export Edition)
 ===========================================================================
 Each output mode now builds its 13-band image fully inside Earth Engine and
-exports it directly to a GEE asset. The monthly calculations are unchanged
-and the workflow is entirely server-side.
+exports it directly to a GEE asset. The monthly calculations are performed
+entirely server-side in Earth Engine.
 
   PIXEL CONSISTENCY GUARANTEE
   ----------------------------
@@ -14,8 +14,8 @@ and the workflow is entirely server-side.
   resampled to this grid before export. Pixels outside the tehsil boundary
   are written as NoData (-9999).
 
-  Band descriptions, gap-fill status, and valid-pixel counts are stored as
-  Earth Engine image properties on the exported assets.
+  Band descriptions and valid-pixel counts are stored as Earth Engine image
+  properties on the exported assets.
 
   Core Layers + Derived Applications
   ----------------------------------
@@ -277,10 +277,62 @@ def _build_bplut_image(lc_img: ee.Image) -> ee.Image:
     return ee.Image.cat([eps_max, tmin_min, tmin_max, vpd_min, vpd_max])
 
 
-def build_gpp_stack(region: ee.Geometry, year: int, proj: ee.Projection) -> ee.Image:
+def _fill_monthly_collection(raw_monthly: ee.ImageCollection, value_band: str,
+                             fallback_value=None) -> ee.ImageCollection:
+    """Fill monthly gaps from neighbouring months within a +/-60 day window."""
+    def interpolate(img):
+        time_start = img.get("system:time_start")
+        neighbours = (
+            raw_monthly.select(value_band)
+            .filterDate(ee.Date(time_start).advance(-60, "day"),
+                        ee.Date(time_start).advance(60, "day"))
+        )
+        filled = neighbours.mean()
+        out = img.select(value_band).unmask(filled)
+        if fallback_value is not None:
+            out = out.unmask(fallback_value)
+        return (
+            out.rename(value_band).float()
+            .set("month", img.get("month"))
+            .set("system:time_start", time_start)
+        )
+
+    return raw_monthly.map(interpolate)
+
+
+def _monthly_collection_to_stack(monthly_col: ee.ImageCollection, value_band: str,
+                                 output_prefix: str, region: ee.Geometry) -> ee.Image:
+    """Convert a monthly image collection into a named 12-band stack."""
+    def rename_month(img):
+        month_str = ee.String(ee.Number(img.get("month")).format("%02d"))
+        return img.select(value_band).rename(ee.String(output_prefix).cat(month_str)).float()
+
+    named = monthly_col.map(rename_month)
+    stack = named.toBands().clip(region)
+    current_names = stack.bandNames()
+    new_names = current_names.map(lambda n: ee.String(n).split("_").slice(1).join("_"))
+    return stack.rename(new_names)
+
+
+def _make_raw_monthly_ndvi(month, ls_col, year):
+    start = ee.Date.fromYMD(year, month, 1)
+    end = start.advance(1, "month")
+    mid = start.advance(15, "day").millis()
+    monthly_collection = ls_col.filterDate(start, end)
+    ndvi = (
+        monthly_collection
+        .map(lambda img: img.normalizedDifference(["SR_B5", "SR_B4"]).rename("NDVI"))
+        .mean()
+        .rename("NDVI")
+    )
+    return ndvi.set("month", month).set("system:time_start", mid)
+
+
+def build_gpp_stack(region: ee.Geometry, year: int,
+                    proj: ee.Projection) -> ee.Image:
     """
-    Build a 12-band monthly GPP image at 30 m using the Light Use Efficiency
-    method (Monteith 1972; MOD17 framework).
+    Build a 12-band monthly GPP image at 30 m using the documented
+    Light Use Efficiency method (Monteith 1972; MOD17 framework).
 
         GPP_m = PAR_m x fAPAR_m x eps_max x TMIN_scalar_m x VPD_scalar_m
 
@@ -306,16 +358,20 @@ def build_gpp_stack(region: ee.Geometry, year: int, proj: ee.Projection) -> ee.I
 
     year_start = ee.Date.fromYMD(year, 1, 1)
     year_end = ee.Date.fromYMD(year + 1, 1, 1)
-    ls_annual = (
+    ls_col = (
         ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
         .filterBounds(region)
         .filterDate(year_start, year_end)
     )
-    ndvi_annual_mean = (
-        ls_annual
-        .map(lambda img: img.normalizedDifference(["SR_B5", "SR_B4"]).rename("NDVI"))
-        .mean()
+    months = ee.List.sequence(1, 12)
+    raw_ndvi_monthly = ee.ImageCollection.fromImages(
+        months.map(lambda m: _make_raw_monthly_ndvi(ee.Number(m), ls_col, year))
     )
+    ndvi_monthly = _fill_monthly_collection(raw_ndvi_monthly, "NDVI")
+    ndvi_by_month = {
+        month: ee.Image(ndvi_monthly.filter(ee.Filter.eq("month", month)).first()).select("NDVI")
+        for month in range(1, 13)
+    }
 
     bands = []
     for month in range(1, 13):
@@ -338,13 +394,7 @@ def build_gpp_stack(region: ee.Geometry, year: int, proj: ee.Projection) -> ee.I
         swdown = _gldas_mean_reproj("SWdown_f_tavg").multiply(0.0864)
         par = swdown.multiply(0.45)
 
-        ls_month = (
-            ls_annual
-            .filterDate(start, end)
-            .map(lambda img: img.normalizedDifference(["SR_B5", "SR_B4"]).rename("NDVI"))
-            .mean()
-        )
-        ndvi = ls_month.unmask(ndvi_annual_mean).unmask(ee.Image.constant(0.05))
+        ndvi = ndvi_by_month[month]
         fapar = (
             ndvi.multiply(1.24)
             .subtract(0.168)
@@ -406,51 +456,21 @@ def _get_proj_30m(region: ee.Geometry, year: int) -> ee.Projection:
     return ls_ref.select("SR_B5").projection()
 
 
-def build_aet_stack(region: ee.Geometry, classifier: ee.Classifier, year: int) -> tuple:
-    """
-    Returns (aet_stack, gap_flags).
-    aet_stack : ee.Image, 12 bands ET_01...ET_12  (0.1 mm/day, mean daily)
-    gap_flags : list[bool], True = month gap-filled by +/-60-day neighbour mean
-    """
+def build_aet_stack(region: ee.Geometry, classifier: ee.Classifier, year: int) -> ee.Image:
+    """12-band ET_01...ET_12 stack (0.1 mm/day, mean daily)."""
     ls_col = (
         ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
         .filterBounds(region)
         .filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year, 12, 31))
     )
 
-    scene_counts = []
-    for month in range(1, 13):
-        start = ee.Date.fromYMD(year, month, 1)
-        end = start.advance(1, "month")
-        count = ls_col.filterDate(start, end).size().getInfo()
-        scene_counts.append(count)
-        print(f"  {MONTH_ABBR[month-1]:>3}: {count} Landsat scene(s)")
-
     months = ee.List.sequence(1, 12)
     raw_monthly = ee.ImageCollection.fromImages(
         months.map(lambda m: _make_raw_monthly(ee.Number(m), ls_col, region, classifier, year))
     )
-
-    def interpolate(img):
-        time_start = img.get("system:time_start")
-        neighbours = (
-            raw_monthly.select("ET_daily")
-            .filterDate(ee.Date(time_start).advance(-60, "day"),
-                        ee.Date(time_start).advance(60, "day"))
-        )
-        filled = neighbours.mean()
-        et_filled = img.select("ET_daily").unmask(filled).unmask(0)
-        month_str = ee.String(ee.Number(img.get("month")).format("%02d"))
-        return et_filled.rename(ee.String("ET_").cat(month_str)).float()
-
-    interp_col = raw_monthly.map(interpolate)
-    stack = interp_col.toBands().clip(region)
-    current_names = stack.bandNames()
-    new_names = current_names.map(lambda n: ee.String(n).split("_").slice(1).join("_"))
-    stack = stack.rename(new_names)
-
-    gap_flags = [count == 0 for count in scene_counts]
-    return stack, gap_flags
+    interp_col = _fill_monthly_collection(raw_monthly, "ET_daily", fallback_value=0)
+    stack = _monthly_collection_to_stack(interp_col, "ET_daily", "ET_", region)
+    return stack
 
 
 def _make_raw_monthly(month, ls_col, region, classifier, year):
@@ -466,33 +486,39 @@ def _make_raw_monthly(month, ls_col, region, classifier, year):
     return et.set("month", month).set("system:time_start", mid)
 
 
+def _make_raw_monthly_pet(month, modis_col, year, proj):
+    start = ee.Date.fromYMD(year, month, 1)
+    end = start.advance(1, "month")
+    mid = start.advance(15, "day").millis()
+    pet = (
+        modis_col.filterDate(start, end)
+        .select("PET")
+        .mean()
+        .divide(8)
+        .resample("bilinear")
+        .reproject(crs=proj, scale=30)
+        .rename("PET_daily")
+        .float()
+    )
+    return pet.set("month", month).set("system:time_start", mid)
+
+
 def build_pet_stack(region: ee.Geometry, year: int,
                     modis_col_id: str, proj: ee.Projection) -> ee.Image:
     """
     12-band PET stack PET_01...PET_12 (0.1 mm/day) at 30 m.
     MOD16A2 is 8-day composite; divide by 8 for daily rate.
     500 m MODIS pixel bilinearly resampled to the 30 m Landsat grid.
+    Months with no MODIS composites are filled using a +/-60 day window.
     """
     modis_col = ee.ImageCollection(modis_col_id).filterBounds(region)
-    bands = []
-    for month in range(1, 13):
-        start = ee.Date.fromYMD(year, month, 1)
-        end = start.advance(1, "month")
-        pet = (
-            modis_col.filterDate(start, end)
-            .select("PET")
-            .mean()
-            .divide(8)
-            .resample("bilinear")
-            .reproject(crs=proj, scale=30)
-            .rename(f"PET_{month:02d}")
-            .float()
-        )
-        bands.append(pet)
-    stack = bands[0]
-    for band in bands[1:]:
-        stack = stack.addBands(band)
-    return stack.clip(region)
+    months = ee.List.sequence(1, 12)
+    raw_monthly = ee.ImageCollection.fromImages(
+        months.map(lambda m: _make_raw_monthly_pet(ee.Number(m), modis_col, year, proj))
+    )
+    interp_col = _fill_monthly_collection(raw_monthly, "PET_daily", fallback_value=0)
+    stack = _monthly_collection_to_stack(interp_col, "PET_daily", "PET_", region)
+    return stack
 
 
 def build_rwdi_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
@@ -573,17 +599,6 @@ def _prepare_asset_target(asset_id: str, overwrite: bool) -> None:
     ee.data.deleteAsset(asset_id)
 
 
-def _reduce_region_kwargs(proj_info: dict) -> dict:
-    kwargs = {
-        "scale": 30,
-        "maxPixels": 1e13,
-    }
-    crs = proj_info.get("crs")
-    if crs:
-        kwargs["crs"] = crs
-    return kwargs
-
-
 def _build_common_pixel_mask(region: ee.Geometry,
                              default_proj: ee.Projection) -> ee.Image:
     """Rasterize the tehsil once on the chosen 30 m grid for all outputs."""
@@ -654,8 +669,7 @@ def _finalize_export_image(monthly_stack: ee.Image, annual_band: ee.Image,
         image = image.setDefaultProjection(default_proj)
     if common_mask is not None:
         image = image.updateMask(common_mask)
-    else:
-        image = image.clip(region)
+    image = image.clip(region)
     image = image.unmask(NODATA).float()
     props = {"nodata": NODATA}
     props.update(metadata)
@@ -664,75 +678,11 @@ def _finalize_export_image(monthly_stack: ee.Image, annual_band: ee.Image,
     return _apply_image_properties(image, props)
 
 
-def _count_mask_pixels(mask_image: ee.Image, region: ee.Geometry,
-                       proj_info: dict) -> int:
-    stats = mask_image.reduceRegion(
-        reducer=ee.Reducer.count(),
-        geometry=region,
-        **_reduce_region_kwargs(proj_info),
-    ).getInfo() or {}
-    return int(round(float(stats.get("common_mask", 0))))
-
-
-def _count_valid_pixels(image: ee.Image, region: ee.Geometry, proj_info: dict,
-                        band_name: str = "b1") -> int:
-    valid = image.select(band_name).updateMask(image.select(band_name).neq(NODATA))
-    stats = valid.reduceRegion(
-        reducer=ee.Reducer.count(),
-        geometry=region,
-        **_reduce_region_kwargs(proj_info),
-    ).getInfo() or {}
-    return int(round(float(stats.get(band_name, 0))))
-
-
-def _get_band_summary_stats(image: ee.Image, region: ee.Geometry,
-                            proj_info: dict, band_name: str = "b13") -> dict:
-    reducer = (
-        ee.Reducer.count()
-        .combine(reducer2=ee.Reducer.mean(), sharedInputs=True)
-        .combine(reducer2=ee.Reducer.minMax(), sharedInputs=True)
-        .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True)
-    )
-    clean = image.select(band_name).updateMask(image.select(band_name).neq(NODATA))
-    stats = clean.reduceRegion(
-        reducer=reducer,
-        geometry=region,
-        **_reduce_region_kwargs(proj_info),
-    ).getInfo() or {}
-    prefix = band_name
-    return {
-        "count": int(round(float(stats.get(f"{prefix}_count", 0)))),
-        "mean": float(stats.get(f"{prefix}_mean", float("nan"))),
-        "min": float(stats.get(f"{prefix}_min", float("nan"))),
-        "max": float(stats.get(f"{prefix}_max", float("nan"))),
-        "stdDev": float(stats.get(f"{prefix}_stdDev", float("nan"))),
-    }
-
-
-def _print_asset_stats_from_summary(label: str, summary: dict,
-                                    band_label: str = None) -> None:
-    count = int(summary.get("count", 0))
-    if count == 0:
-        print(f"\n  {label}: no valid data")
-        return
-    print(f"\n  {label}")
-    if band_label:
-        print(f"    Valid pixels ({band_label}) : {count:,}")
-    else:
-        print(f"    Valid pixels : {count:,}")
-    print(f"    Mean : {float(summary['mean']):.4f}")
-    print(f"    Min  : {float(summary['min']):.4f}")
-    print(f"    Max  : {float(summary['max']):.4f}")
-    print(f"    Std  : {float(summary['stdDev']):.4f}")
-
-
-def _start_asset_export(image: ee.Image, asset_id: str, region: ee.Geometry,
-                        proj_info: dict, description: str):
+def _start_asset_export(image: ee.Image, asset_id: str, description: str):
     export_kwargs = {
         "image": image,
         "description": description,
         "assetId": asset_id,
-        "region": region.coordinates().getInfo(),
         "scale": 30,
         "maxPixels": 1e13,
     }
@@ -766,24 +716,13 @@ def _wait_for_tasks(task_specs: list, poll_seconds: int = 30) -> None:
 
 
 def _export_product_asset(label: str, display_name: str, image: ee.Image,
-                          cfg: dict, export_region: ee.Geometry,
-                          proj_info: dict, stats_label: str,
-                          fixed_pixel_count: int = None) -> dict:
+                          cfg: dict) -> dict:
     asset_id = _build_asset_id(cfg, label)
     _prepare_asset_target(asset_id, bool(cfg.get("overwrite_assets", False)))
-    band13_summary = _get_band_summary_stats(image, export_region, proj_info, band_name="b13")
-    band13_valid_pixels = band13_summary["count"]
-    image = image.set("valid_pixel_count", band13_valid_pixels)
-    if fixed_pixel_count is not None:
-        image = image.set("grid_pixel_count", fixed_pixel_count)
     print(f"  {display_name} asset -> {asset_id}")
-    print(f"    Valid pixels          : {band13_valid_pixels:,}")
-    _print_asset_stats_from_summary(stats_label, band13_summary)
     task = _start_asset_export(
         image,
         asset_id,
-        export_region,
-        proj_info,
         description=f"export_{label}_{_asset_token(cfg['tehsil_name'])}_{cfg['year']}",
     )
     return {"asset_id": asset_id, "task": task, "label": label}
@@ -793,26 +732,12 @@ def _export_product_asset(label: str, display_name: str, image: ee.Image,
 # UTILITIES
 # =============================================================================
 
-def _check_landsat(region, year):
-    total = (
-        ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
-        .filterBounds(region)
-        .filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year, 12, 31))
-        .size()
-        .getInfo()
-    )
-    print(f"  Total Landsat scenes for {year}: {total}")
-    if total == 0:
-        print("[ERROR] No Landsat 8 scenes. Check year and tehsil geometry.")
-        sys.exit(1)
-
-
 # =============================================================================
 # CORE LAYER 1 - AET
 # =============================================================================
 
 def run_aet(cfg: dict, region: ee.Geometry,
-            aet_stack=None, gap_flags=None) -> str:
+            aet_stack=None) -> str:
     """
     Monthly mean daily AET for every 30 m pixel.
     Output  : aet_<tehsil>_<year> GEE asset (13 bands)
@@ -827,15 +752,10 @@ def run_aet(cfg: dict, region: ee.Geometry,
     if aet_stack is None:
         print("  Building AET stack ...")
         classifier = build_classifier(cfg["model_aez"])
-        _check_landsat(region, year)
-        aet_stack, gap_flags = build_aet_stack(region, classifier, year)
+        aet_stack = build_aet_stack(region, classifier, year)
 
-    gap_months = [MONTH_ABBR[i] for i, gap in enumerate(gap_flags or []) if gap]
     grid_proj = aet_stack.select("ET_01").projection()
-    proj_info = grid_proj.getInfo()
-    export_region = region.bounds(1)
     common_mask = _build_common_pixel_mask(region, grid_proj)
-    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
     aet_monthly = aet_stack.multiply(0.1)
     footprint = aet_monthly.select("ET_01").mask()
     aet_annual_total = (
@@ -853,23 +773,13 @@ def run_aet(cfg: dict, region: ee.Geometry,
             "tehsil": tehsil,
             "tehsil_asset": cfg["tehsil_asset"],
             "model_aez": cfg["model_aez"],
-            "gap_filled_months": ",".join(gap_months) or "none",
             "description": "Bands 1-12: mean daily AET per month at 30 m; band 13: annual total AET",
         },
         band_descriptions=[f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"],
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    task_spec = _export_product_asset(
-        "aet",
-        "AET",
-        image,
-        cfg,
-        export_region,
-        proj_info,
-        "Annual ET (mm/yr)",
-        fixed_pixel_count=common_pixel_count,
-    )
+    task_spec = _export_product_asset("aet", "AET", image, cfg)
     if cfg.get("wait_exports", True):
         _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
     return task_spec["asset_id"]
@@ -880,7 +790,7 @@ def run_aet(cfg: dict, region: ee.Geometry,
 # =============================================================================
 
 def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
-            gap_flags=None, pet_stack=None) -> str:
+            pet_stack=None) -> str:
     """
     Monthly mean daily PET (MODIS MOD16A2) for every 30 m pixel.
     Output  : pet_<tehsil>_<year> GEE asset (13 bands)
@@ -896,8 +806,7 @@ def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
     if aet_stack is None:
         print("  Building AET stack (pixel-grid carrier) ...")
         classifier = build_classifier(cfg["model_aez"])
-        _check_landsat(region, year)
-        aet_stack, gap_flags = build_aet_stack(region, classifier, year)
+        aet_stack = build_aet_stack(region, classifier, year)
 
     if pet_stack is None:
         print("  Building PET stack (MODIS MOD16A2) ...")
@@ -905,10 +814,7 @@ def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
         pet_stack = build_pet_stack(region, year, modis_col, proj)
 
     grid_proj = aet_stack.select("ET_01").projection()
-    proj_info = grid_proj.getInfo()
-    export_region = region.bounds(1)
     common_mask = _build_common_pixel_mask(region, grid_proj)
-    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
     footprint = aet_stack.select("ET_01").mask()
     pet_monthly = pet_stack.multiply(0.1).updateMask(footprint)
     pet_annual = _ee_annual_total_band(pet_monthly, "PET", year, band_name="PET_annual").updateMask(footprint)
@@ -930,16 +836,7 @@ def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    task_spec = _export_product_asset(
-        "pet",
-        "PET",
-        image,
-        cfg,
-        export_region,
-        proj_info,
-        "Annual PET (mm/yr)",
-        fixed_pixel_count=common_pixel_count,
-    )
+    task_spec = _export_product_asset("pet", "PET", image, cfg)
     if cfg.get("wait_exports", True):
         _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
     return task_spec["asset_id"]
@@ -950,7 +847,7 @@ def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
 # =============================================================================
 
 def run_rwdi(cfg: dict, region: ee.Geometry, aet_stack=None,
-             gap_flags=None, pet_stack=None) -> str:
+             pet_stack=None) -> str:
     """
     RWDI = (1 - AET/PET) x 100 (%)
     Output  : rwdi_<tehsil>_<year> GEE asset (13 bands)
@@ -966,8 +863,7 @@ def run_rwdi(cfg: dict, region: ee.Geometry, aet_stack=None,
     if aet_stack is None:
         print("  Building AET stack ...")
         classifier = build_classifier(cfg["model_aez"])
-        _check_landsat(region, year)
-        aet_stack, gap_flags = build_aet_stack(region, classifier, year)
+        aet_stack = build_aet_stack(region, classifier, year)
 
     if pet_stack is None:
         print("  Building PET stack (MODIS MOD16A2) ...")
@@ -976,10 +872,7 @@ def run_rwdi(cfg: dict, region: ee.Geometry, aet_stack=None,
 
     rwdi_img = build_rwdi_image(aet_stack, pet_stack)
     grid_proj = aet_stack.select("ET_01").projection()
-    proj_info = grid_proj.getInfo()
-    export_region = region.bounds(1)
     common_mask = _build_common_pixel_mask(region, grid_proj)
-    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
     footprint = aet_stack.select("ET_01").mask()
     rwdi_monthly = rwdi_img.updateMask(footprint)
     rwdi_annual = _ee_annual_mean_band(rwdi_monthly, "RWDI", band_name="RWDI_annual").updateMask(footprint)
@@ -1001,23 +894,14 @@ def run_rwdi(cfg: dict, region: ee.Geometry, aet_stack=None,
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    task_spec = _export_product_asset(
-        "rwdi",
-        "RWDI",
-        image,
-        cfg,
-        export_region,
-        proj_info,
-        "Annual mean RWDI (%)",
-        fixed_pixel_count=common_pixel_count,
-    )
+    task_spec = _export_product_asset("rwdi", "RWDI", image, cfg)
     if cfg.get("wait_exports", True):
         _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
     return task_spec["asset_id"]
 
 
 def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
-                        gap_flags=None, pet_stack=None) -> str:
+                        pet_stack=None) -> str:
     """Shared runner for the monthly Kc proxy (AET/PET)."""
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
@@ -1044,8 +928,7 @@ def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
     if aet_stack is None:
         print("  Building AET stack ...")
         classifier = build_classifier(cfg["model_aez"])
-        _check_landsat(region, year)
-        aet_stack, gap_flags = build_aet_stack(region, classifier, year)
+        aet_stack = build_aet_stack(region, classifier, year)
 
     if pet_stack is None:
         print("  Building PET stack (MODIS MOD16A2) ...")
@@ -1054,10 +937,7 @@ def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
 
     ratio_img = stack_builder(aet_stack, pet_stack)
     grid_proj = aet_stack.select("ET_01").projection()
-    proj_info = grid_proj.getInfo()
-    export_region = region.bounds(1)
     common_mask = _build_common_pixel_mask(region, grid_proj)
-    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
     footprint = aet_stack.select("ET_01").mask()
     ratio_monthly = ratio_img.updateMask(footprint)
     ratio_annual = _ee_annual_mean_band(ratio_monthly, "KC", band_name="KC_annual").updateMask(footprint)
@@ -1070,16 +950,7 @@ def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    task_spec = _export_product_asset(
-        label,
-        title,
-        image,
-        cfg,
-        export_region,
-        proj_info,
-        f"Annual mean {title}",
-        fixed_pixel_count=common_pixel_count,
-    )
+    task_spec = _export_product_asset(label, title, image, cfg)
     if cfg.get("wait_exports", True):
         _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
     return task_spec["asset_id"]
@@ -1090,13 +961,13 @@ def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
 # =============================================================================
 
 def run_kc(cfg: dict, region: ee.Geometry, aet_stack=None,
-           gap_flags=None, pet_stack=None) -> str:
+           pet_stack=None) -> str:
     """
     Kc proxy = AET / PET
     Output  : kc_<tehsil>_<year> GEE asset (13 bands)
     """
     return _run_kc_application(cfg, region, aet_stack=aet_stack,
-                               gap_flags=gap_flags, pet_stack=pet_stack)
+                               pet_stack=pet_stack)
 
 
 # =============================================================================
@@ -1104,7 +975,7 @@ def run_kc(cfg: dict, region: ee.Geometry, aet_stack=None,
 # =============================================================================
 
 def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
-            gap_flags=None, gpp_stack=None) -> str:
+            gpp_stack=None) -> str:
     """
     Monthly mean daily GPP via the MOD17 Light Use Efficiency framework.
 
@@ -1120,8 +991,7 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
     if aet_stack is None:
         print("  Building AET stack (pixel-grid carrier) ...")
         classifier = build_classifier(cfg["model_aez"])
-        _check_landsat(region, year)
-        aet_stack, gap_flags = build_aet_stack(region, classifier, year)
+        aet_stack = build_aet_stack(region, classifier, year)
 
     if gpp_stack is None:
         print("  Building GPP stack (LUE model: GLDAS + Landsat NDVI + MCD12Q1) ...")
@@ -1129,10 +999,7 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
         gpp_stack = build_gpp_stack(region, year, proj)
 
     grid_proj = aet_stack.select("ET_01").projection()
-    proj_info = grid_proj.getInfo()
-    export_region = region.bounds(1)
     common_mask = _build_common_pixel_mask(region, grid_proj)
-    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
     footprint = aet_stack.select("ET_01").mask()
     gpp_monthly = gpp_stack.updateMask(footprint)
     gpp_annual = _ee_annual_mean_band(gpp_monthly, "GPP", band_name="GPP_annual").updateMask(footprint)
@@ -1158,16 +1025,7 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    task_spec = _export_product_asset(
-        "gpp",
-        "GPP",
-        image,
-        cfg,
-        export_region,
-        proj_info,
-        "Annual mean GPP (g C/m2/day)",
-        fixed_pixel_count=common_pixel_count,
-    )
+    task_spec = _export_product_asset("gpp", "GPP", image, cfg)
     if cfg.get("wait_exports", True):
         _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
     return task_spec["asset_id"]
@@ -1178,7 +1036,7 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
 # =============================================================================
 
 def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
-            gap_flags=None, gpp_stack=None) -> str:
+            gpp_stack=None) -> str:
     """
     Water Use Efficiency = GPP / AET (g C / kg H2O)
     Output  : wue_<tehsil>_<year> GEE asset (13 bands)
@@ -1193,20 +1051,15 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
     if aet_stack is None:
         print("  Building AET stack (Landsat 8 + GLDAS -> RF model) ...")
         classifier = build_classifier(cfg["model_aez"])
-        _check_landsat(region, year)
-        aet_stack, gap_flags = build_aet_stack(region, classifier, year)
+        aet_stack = build_aet_stack(region, classifier, year)
 
     if gpp_stack is None:
         print("  Building GPP stack (LUE: GLDAS + Landsat NDVI + MCD12Q1) ...")
         proj = _get_proj_30m(region, year)
         gpp_stack = build_gpp_stack(region, year, proj)
 
-    gap_months = [MONTH_ABBR[i] for i, gap in enumerate(gap_flags or []) if gap]
     grid_proj = aet_stack.select("ET_01").projection()
-    proj_info = grid_proj.getInfo()
-    export_region = region.bounds(1)
     common_mask = _build_common_pixel_mask(region, grid_proj)
-    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
     footprint = aet_stack.select("ET_01").mask()
     wue_monthly = build_wue_image(aet_stack, gpp_stack).updateMask(footprint)
     wue_annual = _ee_annual_mean_band(wue_monthly, "WUE", band_name="WUE_annual").updateMask(footprint)
@@ -1224,7 +1077,6 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
             "year": str(year),
             "tehsil": tehsil,
             "tehsil_asset": cfg["tehsil_asset"],
-            "gap_filled_months": ",".join(gap_months) or "none",
             "description": (
                 "WUE = GPP/AET per month + annual mean at 30 m. "
                 "Units: g C fixed per kg of water transpired."
@@ -1234,16 +1086,7 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    task_spec = _export_product_asset(
-        "wue",
-        "WUE",
-        image,
-        cfg,
-        export_region,
-        proj_info,
-        "Annual mean WUE (g C/kg H2O)",
-        fixed_pixel_count=common_pixel_count,
-    )
+    task_spec = _export_product_asset("wue", "WUE", image, cfg)
     if cfg.get("wait_exports", True):
         _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
     return task_spec["asset_id"]
@@ -1273,8 +1116,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
 
     print("\n  [1/3] Building AET stack (Landsat 8 + GLDAS -> RF model) ...")
     classifier = build_classifier(cfg["model_aez"])
-    _check_landsat(region, year)
-    aet_stack, gap_flags = build_aet_stack(region, classifier, year)
+    aet_stack = build_aet_stack(region, classifier, year)
 
     print("\n  [2/3] Building PET stack (MODIS MOD16A2) ...")
     proj = _get_proj_30m(region, year)
@@ -1282,13 +1124,8 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
 
     print("\n  [3/3] Building GPP stack (LUE: GLDAS + Landsat NDVI + MCD12Q1) ...")
     gpp_stack = build_gpp_stack(region, year, proj)
-    gap_months = [MONTH_ABBR[i] for i, gap in enumerate(gap_flags or []) if gap]
-    gap_meta = ",".join(gap_months) or "none"
     grid_proj = aet_stack.select("ET_01").projection()
-    proj_info = grid_proj.getInfo()
-    export_region = region.bounds(1)
     common_mask = _build_common_pixel_mask(region, grid_proj)
-    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
     footprint = aet_stack.select("ET_01").mask()
     results = {}
     task_specs = []
@@ -1309,14 +1146,13 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
             "tehsil": tehsil,
             "tehsil_asset": cfg["tehsil_asset"],
             "model_aez": cfg["model_aez"],
-            "gap_filled_months": gap_meta,
             "description": "Bands 1-12: mean daily AET per month at 30 m; band 13: annual total AET",
         },
         band_descriptions=[f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"],
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    spec = _export_product_asset("aet", "AET", aet_image, cfg, export_region, proj_info, "Annual ET (mm/yr)", fixed_pixel_count=common_pixel_count)
+    spec = _export_product_asset("aet", "AET", aet_image, cfg)
     task_specs.append(spec)
     results["aet"] = spec["asset_id"]
 
@@ -1340,7 +1176,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    spec = _export_product_asset("pet", "PET", pet_image, cfg, export_region, proj_info, "Annual PET (mm/yr)", fixed_pixel_count=common_pixel_count)
+    spec = _export_product_asset("pet", "PET", pet_image, cfg)
     task_specs.append(spec)
     results["pet"] = spec["asset_id"]
 
@@ -1364,7 +1200,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    spec = _export_product_asset("rwdi", "RWDI", rwdi_image, cfg, export_region, proj_info, "Annual mean RWDI (%)", fixed_pixel_count=common_pixel_count)
+    spec = _export_product_asset("rwdi", "RWDI", rwdi_image, cfg)
     task_specs.append(spec)
     results["rwdi"] = spec["asset_id"]
 
@@ -1388,7 +1224,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    spec = _export_product_asset("kc", "Crop Coefficient (Kc)", kc_image, cfg, export_region, proj_info, "Annual mean Crop Coefficient (Kc)", fixed_pixel_count=common_pixel_count)
+    spec = _export_product_asset("kc", "Crop Coefficient (Kc)", kc_image, cfg)
     task_specs.append(spec)
     results["kc"] = spec["asset_id"]
 
@@ -1416,7 +1252,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    spec = _export_product_asset("gpp", "GPP", gpp_image, cfg, export_region, proj_info, "Annual mean GPP (g C/m2/day)", fixed_pixel_count=common_pixel_count)
+    spec = _export_product_asset("gpp", "GPP", gpp_image, cfg)
     task_specs.append(spec)
     results["gpp"] = spec["asset_id"]
 
@@ -1436,14 +1272,13 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
             "year": str(year),
             "tehsil": tehsil,
             "tehsil_asset": cfg["tehsil_asset"],
-            "gap_filled_months": gap_meta,
             "description": "WUE per month + annual mean at 30 m",
         },
         band_descriptions=[f"WUE_{abbr}_gC_per_kgH2O" for abbr in MONTH_ABBR] + ["WUE_annual_mean"],
         default_proj=grid_proj,
         common_mask=common_mask,
     )
-    spec = _export_product_asset("wue", "WUE", wue_image, cfg, export_region, proj_info, "Annual mean WUE (g C/kg H2O)", fixed_pixel_count=common_pixel_count)
+    spec = _export_product_asset("wue", "WUE", wue_image, cfg)
     task_specs.append(spec)
     results["wue"] = spec["asset_id"]
 
