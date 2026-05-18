@@ -1,7 +1,7 @@
 # ET-Applications
 
-**Platform:** Google Earth Engine (GEE) + Python 3.x  
-**Output:** 13-band Earth Engine image assets at 30 m resolution for any tehsil in India  
+**Platform:** Google Earth Engine (GEE) + Python 3.x (Preferably 3.11 or later version)  
+**Output:** 13-band Earth Engine image assets at 30 m resolution for any tehsil in India using actual ET  
 **Models & Training Data:** [Pan_India_Downscaled_Evapotranspiration on GitHub](https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration)
 
 ---
@@ -44,13 +44,6 @@ The **derived applications created from those layers** are:
 - Crop coefficient proxy Kc (AET/PET) per month + annual mean - 13 bands
 - Water Use Efficiency (WUE = GPP/AET) per month + annual mean - 13 bands
 
-This repository is the direct GEE asset-export edition. The scientific
-calculations for AET, PET, GPP, RWDI, Kc, and WUE are the same as in the earlier
-GeoTIFF workflow. The main change is operational: annual layers are finalized
-server-side in Earth Engine and exported directly as assets, so there is no
-local tile download, GeoTIFF merge, or matplotlib plotting step in the current
-version.
-
 The Random Forest models and their training data are fully documented and openly
 available at:  
 **https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration**
@@ -79,22 +72,21 @@ ET_Applications/
 **Workflow at a glance:**
 
 ```text
-        GEE Code Editor                                    Local Machine
--------------------------------                   -------------------------------
+        GEE Code Editor                                             Local Machine
+-------------------------------                            -------------------------------
 1_Check_Tehsil.js
         |
 2_Generate_Tehsil_Boundary.js
         |
 GEE tehsil asset created
-        |----------------------------------> copy tehsil asset path into config.yaml
-                                                                  |
-                                                    python3 et_applications.py
-                                                                  |
-                                     13-band GEE image assets exported under asset_root
-                                                                  |
-                                                    open gee_visualizers/*.js in GEE
-                                                                  |
-                                                visualize the exported assets directly
+        |--------------------------------------------> copy tehsil asset path into config.yaml
+                                                                           |
+                                                                python3 et_applications.py
+13-band GEE image assets exported under asset_root <-----------------------|
+        |
+open gee_visualizers/*.js in GEE
+        |
+visualize the exported assets directly
 ```
 
 ---
@@ -119,7 +111,7 @@ Three GEE assets are required before running the Python script:
 
 ### 3.3 Python Requirements
 
-- Python 3.9 or higher
+- Python 3.11 or higher
 - `pip`
 
 ---
@@ -129,7 +121,7 @@ Three GEE assets are required before running the Python script:
 ### 4.1 Install Python Dependencies
 
 ```bash
-python3 -m pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 4.2 Verify Installation
@@ -280,11 +272,6 @@ python3 et_applications.py
 This reads all settings from `config.yaml`. The default `application: "all"`
 builds the three feature layers plus the three derived applications and exports
 them directly to Earth Engine assets under `export.asset_root`.
-
-The computation path is the same as the earlier GeoTIFF edition for the science
-layers themselves. AET, PET, GPP, RWDI, Kc, and WUE use the same equations;
-only the output handling changed from local download/merge/plotting to
-server-side annual aggregation and asset export.
 
 ### Overriding Config Values from the Command Line
 
