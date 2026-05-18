@@ -1,8 +1,7 @@
 # =============================================================================
-#  ET-Applications - User Configuration File  (GeoTIFF Raster Edition)
-#  Generates multi-band GeoTIFF rasters at 30 m resolution for the tehsil.
-#  All output files are spatially aligned and can be opened in QGIS, ArcGIS,
-#  or any GDAL/rasterio-based workflow.
+#  ET-Applications - User Configuration File  (Direct GEE Asset Export)
+#  Generates 13-band Earth Engine image assets at 30 m resolution for the
+#  tehsil using a fully server-side workflow.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -12,7 +11,7 @@ gee_project: "shuvamdownscalinget"          # Your GEE cloud project ID
 
 # -----------------------------------------------------------------------------
 # TEHSIL IDENTIFICATION
-# (Used for labelling output files only - the actual geometry comes from
+# (Used for labelling exported assets only - the actual geometry comes from
 #  the GEE asset below.)
 # -----------------------------------------------------------------------------
 tehsil:
@@ -43,62 +42,45 @@ time:
   year : 2022          # Year to process (Landsat 8 + MODIS + GLDAS + MCD12Q1)
 
 # -----------------------------------------------------------------------------
-# COMPUTATION SETTINGS
-# -----------------------------------------------------------------------------
-compute:
-  # chunk_size: approximate number of 30 m pixels per download tile.
-  # The script tiles the bounding box so each GEE getDownloadURL request
-  # covers ~chunk_size pixels. Safe default = 25000.
-  # If you get "User memory limit exceeded" errors -> lower to 5000 or 1000.
-  # If downloads are very slow -> raise to 50000.
-  # For the larger 60-band "all" mode, smaller values may be needed.
-  chunk_size: 3000
-
-# -----------------------------------------------------------------------------
 # OUTPUT MODE TO RUN
 # -----------------------------------------------------------------------------
 # Options:
 #   all          - core layers (AET, PET, GPP) + derived applications (RWDI, Kc, WUE)
-#   aet          - core AET layer: monthly AET + annual total AET GeoTIFF
-#   pet          - core PET layer: monthly PET + annual total PET GeoTIFF (MODIS)
-#   gpp          - core GPP layer (LUE) + annual mean GeoTIFF
-#   rwdi         - derived application: monthly RWDI + annual mean GeoTIFF
-#   kc           - derived application: monthly Kc proxy (AET/PET) + annual mean GeoTIFF
-#   wue          - derived application: monthly WUE (GPP/AET) + annual mean GeoTIFF
+#   aet          - core AET layer: monthly AET + annual total AET asset
+#   pet          - core PET layer: monthly PET + annual total PET asset (MODIS)
+#   gpp          - core GPP layer (LUE) + annual mean asset
+#   rwdi         - derived application: monthly RWDI + annual mean asset
+#   kc           - derived application: monthly Kc proxy (AET/PET) + annual mean asset
+#   wue          - derived application: monthly WUE (GPP/AET) + annual mean asset
 application: "all"
 
 # -----------------------------------------------------------------------------
-# OUTPUT SETTINGS
+# EXPORT SETTINGS
 # -----------------------------------------------------------------------------
-output:
-  directory: "./results"     # GeoTIFF and PNG files are written here
-  plot      : true           # Set to false to skip matplotlib charts
-
-# -----------------------------------------------------------------------------
-# OPTIONAL: SAMPLE POINT TIME SERIES
-# If provided, a 6-panel monthly timeseries plot is generated for the
-# pixel nearest to this location. No additional GEE calls are made.
-# -----------------------------------------------------------------------------
-# sample_point:
-#   lon: 80.7314
-#   lat: 25.9735
+export:
+  asset_root: "projects/shuvamdownscalinget/assets"
+  overwrite: true             # true = delete and recreate existing target assets
+  wait_for_tasks: true
+  poll_interval_seconds: 30
 
 # =============================================================================
-# OUTPUT GEOTIFF REFERENCE
+# OUTPUT ASSET REFERENCE
 # =============================================================================
 #
-# File                              Bands  Unit         Description
+# Asset                            Bands  Unit         Description
 # -----------------------------------------------------------------------------
-# aet_<TEHSIL>_<YEAR>.tif           13     mixed        Bands 1-12: mean daily AET; band 13: annual total AET
-# pet_<TEHSIL>_<YEAR>.tif           13     mixed        Bands 1-12: mean daily PET; band 13: annual total PET
-# rwdi_<TEHSIL>_<YEAR>.tif          13     %            RWDI per month + annual mean
-# kc_<TEHSIL>_<YEAR>.tif            13     ratio        Kc proxy (AET/PET) per month + annual mean
-# gpp_<TEHSIL>_<YEAR>.tif           13     g C/m2/day   GPP per month + annual mean
-# wue_<TEHSIL>_<YEAR>.tif           13     g C/kg H2O   WUE per month + annual mean
+# aet_<TEHSIL>_<YEAR>              13     mixed        Bands 1-12: mean daily AET; band 13: annual total AET
+# pet_<TEHSIL>_<YEAR>              13     mixed        Bands 1-12: mean daily PET; band 13: annual total PET
+# rwdi_<TEHSIL>_<YEAR>             13     %            RWDI per month + annual mean
+# kc_<TEHSIL>_<YEAR>               13     ratio        Kc proxy (AET/PET) per month + annual mean
+# gpp_<TEHSIL>_<YEAR>              13     g C/m2/day   GPP per month + annual mean
+# wue_<TEHSIL>_<YEAR>              13     g C/kg H2O   WUE per month + annual mean
 #
 # Notes:
-# - Band descriptions are embedded in every GeoTIFF.
-# - NoData value: -9999
-# - All GeoTIFFs produced by one run share the same CRS, transform, and
-#   30 m pixel grid - they can be overlaid without reprojection.
+# - Exported bands remain in the same monthly/annual order expected by the
+#   existing GEE viewer scripts (`b1` ... `b13`).
+# - NoData value written into exported assets: -9999
+# - Each asset receives image properties such as `valid_pixel_count`,
+#   optional `grid_pixel_count`, band descriptions, formulas, and
+#   source metadata.
 # =============================================================================

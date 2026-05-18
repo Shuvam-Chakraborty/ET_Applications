@@ -1,7 +1,7 @@
 # ET-Applications
 
 **Platform:** Google Earth Engine (GEE) + Python 3.x  
-**Output:** Multi-band GeoTIFF rasters at 30 m resolution for any tehsil in India  
+**Output:** 13-band Earth Engine image assets at 30 m resolution for any tehsil in India  
 **Models & Training Data:** [Pan_India_Downscaled_Evapotranspiration on GitHub](https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration)
 
 ---
@@ -16,8 +16,8 @@
 6. [Step 2 - Configure config.yaml](#6-step-2---configure-configyaml)
 7. [Step 3 - Authenticate Earth Engine in Python](#7-step-3---authenticate-earth-engine-in-python)
 8. [Step 4 - Run the Python Application](#8-step-4---run-the-python-application)
-9. [Output Modes and Output Files](#9-output-modes-and-output-files)
-10. [Output GeoTIFF Band Reference](#10-output-geotiff-band-reference)
+9. [Output Modes and Export Assets](#9-output-modes-and-export-assets)
+10. [Output Asset Band Reference](#10-output-asset-band-reference)
 11. [config.yaml Parameter Reference](#11-configyaml-parameter-reference)
 12. [AEZ Model Assets](#12-aez-model-assets)
 13. [Python Function Reference](#13-python-function-reference)
@@ -28,7 +28,9 @@
 
 ## 1. Project Overview
 
-ET-Applications downscales MODIS-resolution evapotranspiration data to the native 30 m Landsat 8 grid using pre-trained Random Forest models, one model per Agro-Ecological Zone (AEZ) covering all of India.
+ET-Applications downscales MODIS-resolution evapotranspiration data to the native
+30 m Landsat 8 grid using pre-trained Random Forest models, one model per
+Agro-Ecological Zone (AEZ) covering all of India.
 
 The **feature layers collected/calculated** in this workflow are:
 
@@ -42,7 +44,15 @@ The **derived applications created from those layers** are:
 - Crop coefficient proxy Kc (AET/PET) per month + annual mean - 13 bands
 - Water Use Efficiency (WUE = GPP/AET) per month + annual mean - 13 bands
 
-The Random Forest models and their training data are fully documented and openly available at:  
+This repository is the direct GEE asset-export edition. The scientific
+calculations for AET, PET, GPP, RWDI, Kc, and WUE are the same as in the earlier
+GeoTIFF workflow. The main change is operational: annual layers are finalized
+server-side in Earth Engine and exported directly as assets, so there is no
+local tile download, GeoTIFF merge, or matplotlib plotting step in the current
+version.
+
+The Random Forest models and their training data are fully documented and openly
+available at:  
 **https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration**
 
 ---
@@ -62,9 +72,8 @@ ET_Applications/
 |   |-- gpp_viewer.js
 |   |-- rwdi_viewer.js
 |   |-- kc_viewer.js
-|   |-- wue_viewer.js
-|-- README.md
-`-- results/
+|   `-- wue_viewer.js
+`-- README.md
 ```
 
 **Workflow at a glance:**
@@ -81,12 +90,11 @@ GEE tehsil asset created
                                                                   |
                                                     python3 et_applications.py
                                                                   |
-                                                   results/ GeoTIFF + PNG files
-upload GeoTIFFs to GEE assets <-----------------------------------|
-        |
-open gee_visualizers/*.js
-        |
-visualize different bands in GEE
+                                     13-band GEE image assets exported under asset_root
+                                                                  |
+                                                    open gee_visualizers/*.js in GEE
+                                                                  |
+                                                visualize the exported assets directly
 ```
 
 ---
@@ -97,7 +105,7 @@ visualize different bands in GEE
 
 - A Google Earth Engine account is required. Register at: https://code.earthengine.google.com
 - You must have a GEE Cloud Project set up. If you do not have one, create a project at https://console.cloud.google.com and enable the Earth Engine API.
-- Note your Cloud Project ID (for example, `shuvamdownscalinget`). This goes into `config.yaml` and the GEE scripts.
+- Note your Cloud Project ID, for example `shuvamdownscalinget`. This goes into `config.yaml` and the GEE scripts.
 
 ### 3.2 GEE Asset Access
 
@@ -112,7 +120,7 @@ Three GEE assets are required before running the Python script:
 ### 3.3 Python Requirements
 
 - Python 3.9 or higher
-- pip
+- `pip`
 
 ---
 
@@ -127,14 +135,15 @@ python3 -m pip install -r requirements.txt
 ### 4.2 Verify Installation
 
 ```bash
-python3 -c "import ee, numpy, rasterio, requests, yaml; print('All packages OK')"
+python3 -c "import ee, yaml; print('Core packages OK')"
 ```
 
 ---
 
 ## 5. Step 1 - Create the Tehsil Boundary Asset in GEE
 
-This step is performed entirely in the GEE Code Editor at https://code.earthengine.google.com. Run the two JavaScript scripts in sequence.
+This step is performed entirely in the GEE Code Editor at https://code.earthengine.google.com.
+Run the two JavaScript scripts in sequence.
 
 ### 5.1 Run Script 1: 1_Check_Tehsil.js
 
@@ -188,7 +197,7 @@ Once the task completes, copy the full asset path from the console and paste it 
 
 ## 6. Step 2 - Configure config.yaml
 
-Open `config.yaml` in a text editor and update the following fields:
+Open `config.yaml` and update the following fields.
 
 ### Required Fields
 
@@ -213,23 +222,22 @@ time:
 ```yaml
 application: "all"
 
-compute:
-  chunk_size: 3000
+modis:
+  collection: "MODIS/061/MOD16A2GF"
 
-output:
-  directory: "./results"
-  plot      : true
-
-sample_point:
-  lon: 80.7314
-  lat: 25.9735
+export:
+  asset_root: "projects/shuvamdownscalinget/assets"
+  overwrite: true
+  wait_for_tasks: true
+  poll_interval_seconds: 30
 ```
 
 ---
 
 ## 7. Step 3 - Authenticate Earth Engine in Python
 
-Before running the script for the first time, and whenever your token expires, authenticate the Earth Engine Python client.
+Before running the script for the first time, and whenever your token expires,
+authenticate the Earth Engine Python client.
 
 ### 7.1 Run Authentication
 
@@ -258,23 +266,30 @@ Replace `<your-project-id>` with your own GEE Cloud Project ID.
 python3 -c "import ee; ee.Initialize(project='<your-project-id>'); print('EE authenticated OK')"
 ```
 
-Replace `<your-project-id>` with your actual GEE Cloud Project ID.
-
 ---
 
 ## 8. Step 4 - Run the Python Application
 
-With `config.yaml` set and authentication complete, run the script from the directory containing both `et_applications.py` and `config.yaml`:
+With `config.yaml` set and authentication complete, run the script from the
+directory containing both `et_applications.py` and `config.yaml`:
 
 ```bash
 python3 et_applications.py
 ```
 
-This reads all settings from `config.yaml`. The default `application: "all"` generates the three feature layers plus the three derived applications in a single 60-band GEE download pass.
+This reads all settings from `config.yaml`. The default `application: "all"`
+builds the three feature layers plus the three derived applications and exports
+them directly to Earth Engine assets under `export.asset_root`.
+
+The computation path is the same as the earlier GeoTIFF edition for the science
+layers themselves. AET, PET, GPP, RWDI, Kc, and WUE use the same equations;
+only the output handling changed from local download/merge/plotting to
+server-side annual aggregation and asset export.
 
 ### Overriding Config Values from the Command Line
 
-Any value in `config.yaml` can be overridden with a CLI flag. Command-line arguments always take precedence over the config file.
+Any value in `config.yaml` can be overridden with a CLI flag. Command-line
+arguments always take precedence over the config file.
 
 ```bash
 # Run only the AET feature layer
@@ -295,11 +310,14 @@ python3 et_applications.py --year 2021
 # Use a different tehsil asset
 python3 et_applications.py --tehsil-asset "projects/myproject/assets/tehsil_x"
 
-# Enable plots even if config.yaml has plot: false
-python3 et_applications.py --plot
+# Export into a different asset folder
+python3 et_applications.py --asset-root "projects/myproject/assets"
 
-# Extract a timeseries plot for a single pixel by coordinates
-python3 et_applications.py --sample-lon 80.34 --sample-lat 25.12
+# Force replacement of existing output assets
+python3 et_applications.py --overwrite-assets
+
+# Start export tasks and return immediately without polling
+python3 et_applications.py --no-wait-exports
 
 # Use a different config file
 python3 et_applications.py --config /path/to/other_config.yaml
@@ -314,37 +332,41 @@ Full list of CLI flags:
 | `--tehsil-asset` | string | GEE FeatureCollection asset path |
 | `--model-aez` | string | GEE RF model asset path |
 | `--year` | integer | Year to process |
-| `--output` | path | Output directory |
-| `--plot` | flag | Enable matplotlib plots |
+| `--asset-root` | string | Parent GEE asset path where exports will be created |
+| `--overwrite-assets` | flag | Delete an existing target asset before exporting |
+| `--no-wait-exports` | flag | Start export tasks and exit without polling |
 | `--gee-project` | string | GEE Cloud Project ID |
-| `--tehsil-name` | string | Label for output filenames |
-| `--chunk-size` | integer | Pixels per download tile |
-| `--sample-lon` | float | Longitude for single-pixel timeseries plot |
-| `--sample-lat` | float | Latitude for single-pixel timeseries plot |
+| `--tehsil-name` | string | Label for output asset naming |
 
 ---
 
-## 9. Output Modes and Output Files
+## 9. Output Modes and Export Assets
 
-Set `application` in `config.yaml` or use `--application` on the command line. The CLI exposes the three feature layers (`aet`, `pet`, `gpp`) and the three derived applications (`rwdi`, `kc`, `wue`).
+Set `application` in `config.yaml` or use `--application` on the command line.
+The CLI exposes the three feature layers (`aet`, `pet`, `gpp`) and the three
+derived applications (`rwdi`, `kc`, `wue`).
 
-| Mode | Output File | Bands | Description |
+| Mode | Exported Asset | Bands | Description |
 |---|---|---|---|
-| `all` | All six primary outputs | - | Recommended. Builds the three feature layers once, downloads once in a single 60-band pass, and writes the three feature layers plus the three derived applications with pixel-perfect spatial alignment. |
-| `aet` | `aet_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Bands 1-12: monthly mean daily AET (mm/day); band 13: annual total AET (mm/yr) |
-| `pet` | `pet_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Bands 1-12: monthly mean daily PET (mm/day); band 13: annual total PET (mm/yr) |
-| `gpp` | `gpp_<TEHSIL>_<YEAR>.tif` | 13 | Feature layer. Monthly GPP (g C/m2/day) + annual mean |
-| `rwdi` | `rwdi_<TEHSIL>_<YEAR>.tif` | 13 | Derived application. Monthly RWDI (%) + annual mean |
-| `kc` | `kc_<TEHSIL>_<YEAR>.tif` | 13 | Derived application. Monthly crop coefficient proxy (AET/PET) + annual mean |
-| `wue` | `wue_<TEHSIL>_<YEAR>.tif` | 13 | Derived application. Monthly WUE (g C/kg H2O) + annual mean |
+| `all` | All six primary assets under `asset_root` | - | Recommended. Builds the three feature layers once and exports `aet`, `pet`, `rwdi`, `kc`, `gpp`, and `wue` with aligned pixels. |
+| `aet` | `<asset_root>/aet_<TEHSIL>_<YEAR>` | 13 | Feature layer. Bands 1-12: monthly mean daily AET (mm/day); band 13: annual total AET (mm/yr) |
+| `pet` | `<asset_root>/pet_<TEHSIL>_<YEAR>` | 13 | Feature layer. Bands 1-12: monthly mean daily PET (mm/day); band 13: annual total PET (mm/yr) |
+| `gpp` | `<asset_root>/gpp_<TEHSIL>_<YEAR>` | 13 | Feature layer. Monthly GPP (g C/m2/day) + annual mean |
+| `rwdi` | `<asset_root>/rwdi_<TEHSIL>_<YEAR>` | 13 | Derived application. Monthly RWDI (%) + annual mean |
+| `kc` | `<asset_root>/kc_<TEHSIL>_<YEAR>` | 13 | Derived application. Monthly crop coefficient proxy (AET/PET) + annual mean |
+| `wue` | `<asset_root>/wue_<TEHSIL>_<YEAR>` | 13 | Derived application. Monthly WUE (g C/kg H2O) + annual mean |
 
-When `plot: true`, each output also saves a PNG chart alongside its GeoTIFF.
+Each exported image keeps the band order expected by the GEE viewer scripts:
+`b1` to `b12` for monthly layers and `b13` for the annual layer.
+
+Each asset also carries image properties such as band descriptions,
+`valid_pixel_count`, formula metadata, and source metadata.
 
 ---
 
-## 10. Output GeoTIFF Band Reference
+## 10. Output Asset Band Reference
 
-### `aet_<TEHSIL>_<YEAR>.tif` - 13 bands
+### `aet_<TEHSIL>_<YEAR>` - 13 bands
 
 | Band | Description | Unit |
 |---|---|---|
@@ -354,9 +376,10 @@ When `plot: true`, each output also saves a PNG chart alongside its GeoTIFF.
 | 12 | `ET_Dec_daily_mm` - December mean daily AET | mm/day |
 | 13 | `ET_annual_mm` - Annual total AET = sum(monthly daily AET x days in month) | mm/yr |
 
-TIFF metadata tag `gap_filled_months` lists any months filled by plus/minus 60-day temporal interpolation.
+The image property `gap_filled_months` lists any months filled by plus/minus
+60-day temporal interpolation.
 
-### `pet_<TEHSIL>_<YEAR>.tif` - 13 bands
+### `pet_<TEHSIL>_<YEAR>` - 13 bands
 
 | Band | Description | Unit |
 |---|---|---|
@@ -365,28 +388,28 @@ TIFF metadata tag `gap_filled_months` lists any months filled by plus/minus 60-d
 | 12 | `PET_Dec_daily_mm` - December mean daily PET | mm/day |
 | 13 | `PET_annual_mm` - Pixel-wise annual total PET = sum(monthly daily PET x days in month) | mm/yr |
 
-### `rwdi_<TEHSIL>_<YEAR>.tif` - 13 bands
+### `rwdi_<TEHSIL>_<YEAR>` - 13 bands
 
 | Band | Description | Unit |
 |---|---|---|
 | 1-12 | `RWDI_Jan` ... `RWDI_Dec` - RWDI = (1 - AET/PET) x 100 | % |
 | 13 | `RWDI_annual` - Pixel-wise mean RWDI across 12 months | % |
 
-### `kc_<TEHSIL>_<YEAR>.tif` - 13 bands
+### `kc_<TEHSIL>_<YEAR>` - 13 bands
 
 | Band | Description | Unit |
 |---|---|---|
 | 1-12 | `KC_Jan` ... `KC_Dec` - Crop coefficient proxy = AET/PET | ratio |
 | 13 | `KC_annual` - Pixel-wise mean Kc across 12 months | ratio |
 
-### `gpp_<TEHSIL>_<YEAR>.tif` - 13 bands
+### `gpp_<TEHSIL>_<YEAR>` - 13 bands
 
 | Band | Description | Unit |
 |---|---|---|
 | 1-12 | `GPP_Jan_gC_m2_day` ... `GPP_Dec_gC_m2_day` - Monthly mean daily GPP | g C/m2/day |
 | 13 | `GPP_annual_mean` - Pixel-wise mean GPP across 12 months | g C/m2/day |
 
-### `wue_<TEHSIL>_<YEAR>.tif` - 13 bands
+### `wue_<TEHSIL>_<YEAR>` - 13 bands
 
 | Band | Description | Unit |
 |---|---|---|
@@ -400,25 +423,27 @@ TIFF metadata tag `gap_filled_months` lists any months filled by plus/minus 60-d
 | Section | Key | Type | Description |
 |---|---|---|---|
 | (root) | `gee_project` | string | GEE Cloud Project ID |
-| `tehsil` | `state` | string | State name used for output file naming |
-| `tehsil` | `district` | string | District name used for output file naming |
-| `tehsil` | `name` | string | Tehsil name used for output file naming |
+| `tehsil` | `state` | string | State name used for labelling |
+| `tehsil` | `district` | string | District name used for labelling |
+| `tehsil` | `name` | string | Tehsil name used for exported asset naming |
 | `assets` | `tehsil_asset` | string | Full GEE FeatureCollection path for the tehsil boundary |
 | `assets` | `model_aez` | string | Full GEE asset path for the Random Forest AEZ model |
 | `modis` | `collection` | string | MODIS ImageCollection ID |
 | `time` | `year` | integer | Calendar year to process |
-| `compute` | `chunk_size` | integer | Approximate pixels per GEE download tile |
 | (root) | `application` | string | Mode: `all`, `aet`, `pet`, `rwdi`, `kc`, `gpp`, `wue` |
-| `output` | `directory` | path | Directory where GeoTIFF and PNG files are written |
-| `output` | `plot` | boolean | Whether to generate matplotlib plots |
-| `sample_point` | `lon` | float | Longitude for single-pixel timeseries plot |
-| `sample_point` | `lat` | float | Latitude for single-pixel timeseries plot |
+| `export` | `asset_root` | string | Parent GEE asset path where output images will be created |
+| `export` | `overwrite` | boolean | Whether to delete and recreate an existing target asset |
+| `export` | `wait_for_tasks` | boolean | Whether to poll GEE export tasks until completion |
+| `export` | `poll_interval_seconds` | integer | Delay between export task status checks |
 
 ---
 
 ## 12. AEZ Model Assets
 
-The downscaling pipeline uses one Random Forest model per Agro-Ecological Zone (AEZ). All 19 models are publicly accessible as GEE assets under the project `shuvamdownscalinget`. Set the appropriate model in `config.yaml` under `assets.model_aez` based on the AEZ your tehsil falls in.
+The downscaling pipeline uses one Random Forest model per Agro-Ecological Zone
+(AEZ). All 19 models are publicly accessible as GEE assets under the project
+`shuvamdownscalinget`. Set the appropriate model in `config.yaml` under
+`assets.model_aez` based on the AEZ your tehsil falls in.
 
 | AEZ | GEE Asset Path |
 |---|---|
@@ -442,14 +467,16 @@ The downscaling pipeline uses one Random Forest model per Agro-Ecological Zone (
 | AEZ 18 | `projects/shuvamdownscalinget/assets/rf_aez18_final` |
 | AEZ 19 | `projects/shuvamdownscalinget/assets/rf_aez19_final` |
 
-For full details on model training, input features, validation results, and AEZ delineation, see:  
+For full details on model training, input features, validation results, and AEZ
+delineation, see:  
 **https://github.com/Shuvam-Chakraborty/Pan_India_Downscaled_Evapotranspiration**
 
 ---
 
 ## 13. Python Function Reference
 
-This section explains the major functions in `et_applications.py` and where they fit in the workflow.
+This section explains the major functions in `et_applications.py` and where they
+fit in the workflow.
 
 ### Configuration
 
@@ -496,88 +523,72 @@ Builds the 12-band monthly GPP stack using the LUE framework.
 **`_build_bplut_image(lc_img)`**  
 Maps MODIS land-cover classes to the BPLUT parameter layers used by GPP.
 
-**`build_combined_image(aet_stack, pet_stack, gpp_stack, year)`**  
-Stacks the feature and derived layers into one 60-band GEE image for `all` mode.
+**`build_wue_image(aet_stack, gpp_stack)`**  
+Computes monthly WUE from GPP and AET.
 
-### Download Infrastructure
+### Annual Aggregation Helpers
 
-**`_download_image_as_geotiff(img, region, chunk_size, label)`**  
-Downloads tiled GeoTIFF chunks from GEE.
+**`_ee_annual_total_band(monthly_stack, prefix, year, band_name)`**  
+Computes a pixel-wise annual total inside Earth Engine from 12 monthly
+mean-daily bands.
 
-**`_merge_tiles(tile_paths, nodata)`**  
-Merges downloaded tiles into one array and raster profile.
+**`_ee_annual_mean_band(monthly_stack, prefix, band_name)`**  
+Computes a pixel-wise annual mean inside Earth Engine from 12 monthly bands.
 
-**`_quiet_gdal()`**  
-Suppresses low-level GDAL/libtiff warning noise during raster operations.
+### Asset Export Helpers
 
-**`_save_geotiff(arr, profile, output_path, band_names, metadata)`**  
-Writes the final multi-band GeoTIFF with band descriptions and metadata.
+**`_build_asset_id(cfg, label)`**  
+Builds the final asset path under `export.asset_root`.
 
-### Array Utilities
+**`_prepare_asset_target(asset_id, overwrite)`**  
+Checks whether the destination asset exists and optionally deletes it before
+export.
 
-**`_scale_nodata(arr, scale, nodata)`**  
-Applies a scale factor while preserving NoData.
+**`_finalize_export_image(monthly_stack, annual_band, region, metadata, band_descriptions, ...)`**  
+Builds the final 13-band image, applies the common tehsil mask, and attaches
+metadata.
 
-**`_annual_mean_band(monthly_12, nodata)`**  
-Computes a pixel-wise annual mean from 12 monthly bands.
+**`_export_product_asset(label, display_name, image, cfg, export_region, proj_info, stats_label, ...)`**  
+Prints annual statistics and launches the Earth Engine asset export task.
 
-**`_annual_total_band(monthly_12, year, nodata)`**  
-Computes a pixel-wise annual total from 12 monthly mean-daily bands.
-
-**`compute_wue_numpy(gpp_monthly, aet_monthly_raw, nodata)`**  
-Computes monthly WUE in Python as `GPP / AET`.
-
-**`_band_stats(arr, nodata)`**  
-Computes per-band mean and standard deviation across valid pixels.
-
-**`_print_stats(label, arr, nodata)`**  
-Prints a summary of valid pixel count and basic statistics.
+**`_wait_for_tasks(task_specs, poll_seconds)`**  
+Polls Earth Engine export tasks until completion when `wait_for_tasks: true`.
 
 ### Output Runners
 
 **`run_aet(cfg, region, ...)`**  
-Builds or reuses the AET feature layer, appends annual total AET as band 13, and saves `aet_<TEHSIL>_<YEAR>.tif`.
+Builds or reuses the AET feature layer, appends annual total AET as band 13,
+and exports `aet_<TEHSIL>_<YEAR>`.
 
 **`run_pet(cfg, region, ...)`**  
-Builds or reuses the PET feature layer, appends annual total PET as band 13, and saves `pet_<TEHSIL>_<YEAR>.tif`.
+Builds or reuses the PET feature layer, appends annual total PET as band 13,
+and exports `pet_<TEHSIL>_<YEAR>`.
 
 **`run_rwdi(cfg, region, ...)`**  
-Builds RWDI, appends annual mean RWDI as band 13, and saves `rwdi_<TEHSIL>_<YEAR>.tif`.
+Builds RWDI, appends annual mean RWDI as band 13, and exports
+`rwdi_<TEHSIL>_<YEAR>`.
 
 **`run_kc(cfg, region, ...)`**  
-Builds Kc, appends annual mean Kc as band 13, and saves `kc_<TEHSIL>_<YEAR>.tif`.
+Builds Kc, appends annual mean Kc as band 13, and exports `kc_<TEHSIL>_<YEAR>`.
 
 **`run_gpp(cfg, region, ...)`**  
-Builds GPP, appends annual mean GPP as band 13, and saves `gpp_<TEHSIL>_<YEAR>.tif`.
+Builds GPP, appends annual mean GPP as band 13, and exports
+`gpp_<TEHSIL>_<YEAR>`.
 
 **`run_wue(cfg, region, ...)`**  
-Builds WUE, appends annual mean WUE as band 13, and saves `wue_<TEHSIL>_<YEAR>.tif`.
+Builds WUE, appends annual mean WUE as band 13, and exports
+`wue_<TEHSIL>_<YEAR>`.
 
 **`run_all(cfg, region)`**  
-Builds the three feature layers once, downloads the combined image once, and writes all six outputs with aligned pixels.
-
-### Sample Point
-
-**`run_sample_timeseries(output_paths, cfg)`**  
-Extracts the nearest pixel from saved GeoTIFFs and generates the optional six-panel sample plot.
-
-### Plot Functions
-
-| Function | Input shape | Output |
-|---|---|---|
-| `_plot_aet` | `(12, H, W)` mm/day | AET line chart with plus/minus 1 std fill |
-| `_plot_pet` | `(12, H, W)` mm/day | PET line chart with plus/minus 1 std fill |
-| `_plot_rwdi` | `(12, H, W)` % | RWDI monthly line chart |
-| `_plot_kc` | `(12, H, W)` ratio | Kc monthly line chart |
-| `_plot_gpp` | `(12, H, W)` g C/m2/day | GPP line chart with plus/minus 1 std fill |
-| `_plot_wue` | `(12, H, W)` g C/kg H2O | WUE line chart with plus/minus 1 std fill |
-| `_plot_sample_timeseries` | 6 x `(12,)` arrays | Six-panel timeseries for a single pixel |
+Builds the three feature layers once and exports all six aligned assets in one
+run.
 
 ---
 
 ## 14. Using the GEE Visualizer Scripts
 
-The `gee_visualizers/` folder contains one Earth Engine Code Editor script for each output:
+The `gee_visualizers/` folder contains one Earth Engine Code Editor script for
+each output:
 
 - `aet_viewer.js`
 - `pet_viewer.js`
@@ -588,25 +599,33 @@ The `gee_visualizers/` folder contains one Earth Engine Code Editor script for e
 
 Use them as follows:
 
-1. Generate the GeoTIFF locally with `python3 et_applications.py`.
-2. Upload the required GeoTIFF from `results/` to your Earth Engine assets.
-3. Open the matching script from `gee_visualizers/` in the GEE Code Editor.
-4. Set the two variables in the `USER CONFIG` block at the top of the script:
+1. Run `python3 et_applications.py` so the required Earth Engine image asset is exported.
+2. Open the matching script from `gee_visualizers/` in the GEE Code Editor.
+3. Set the two variables in the `USER CONFIG` block at the top of the script:
 
 ```javascript
-var ASSET_ID     = 'projects/<your-project>/assets/<geotiff-asset-name>';
+var ASSET_ID     = 'projects/<your-project>/assets/<exported-asset-name>';
 var TEHSIL_ASSET = 'projects/<your-project>/assets/tehsil_<state>__<district>__<tehsil>';
 ```
 
-`ASSET_ID` is the path to the uploaded GeoTIFF asset. `TEHSIL_ASSET` is the same tehsil boundary asset created in Step 1 — its path is already recorded in `config.yaml` under `assets.tehsil_asset`.
+`ASSET_ID` is the path to the exported 13-band Earth Engine image asset, for
+example `projects/<your-project>/assets/aet_<tehsil>_<year>`. `TEHSIL_ASSET` is
+the same tehsil boundary asset created in Step 1 - its path is already
+recorded in `config.yaml` under `assets.tehsil_asset`.
 
-5. Click `Run`.
+4. Click `Run`.
 
-Each of the 13 bands is added as a separate named layer (`AET - Jan`, `AET - Feb`, …, `AET - Annual total`). Use GEE's native **Layers** panel (top-right of the map) to toggle visibility between months. Only the first band (January) is visible on load. The tehsil boundary is drawn as a black outline over all layers.
+Each of the 13 bands is added as a separate named layer (`AET - Jan`,
+`AET - Feb`, ..., `AET - Annual total`). Use GEE's native **Layers** panel
+(top-right of the map) to toggle visibility between months. Only the first band
+(January) is visible on load. The tehsil boundary is drawn as a black outline
+over all layers.
 
-Colour stretch min/max values are computed automatically from the actual pixel data in the uploaded GeoTIFF — no manual adjustment is needed.
+Colour stretch min/max values are computed automatically from the actual pixel
+data in the exported asset - no manual adjustment is needed.
 
-When a GeoTIFF is uploaded to GEE, Earth Engine names the bands `b1` to `b13`. The visualizer scripts are already written to use those band names.
+The exported assets already use the band names `b1` to `b13`. The visualizer
+scripts are written to use those names directly.
 
 Band 13 meaning:
 
@@ -617,7 +636,8 @@ Band 13 meaning:
 
 ## 15. Changing to a Different Tehsil
 
-To process a new tehsil, repeat the following steps. `et_applications.py` does not need to be modified.
+To process a new tehsil, repeat the following steps. `et_applications.py` does
+not need to be modified.
 
 **Step 1 - Run Script 1 in GEE**
 
@@ -636,7 +656,9 @@ Click `Run` and confirm the correct tehsil appears in the map and console.
 
 **Step 2 - Export the new asset with Script 2**
 
-Copy the same `CONFIG` into `2_Generate_Tehsil_Boundary.js`, click `Run`, then start the export from the `Tasks` tab. Wait until it reaches `COMPLETED` and copy the asset path from the console.
+Copy the same `CONFIG` into `2_Generate_Tehsil_Boundary.js`, click `Run`, then
+start the export from the `Tasks` tab. Wait until it reaches `COMPLETED` and
+copy the asset path from the console.
 
 **Step 3 - Update config.yaml**
 
@@ -652,6 +674,9 @@ assets:
 
 time:
   year : 2022
+
+export:
+  asset_root: "projects/<your-project>/assets"
 ```
 
 **Step 4 - Run**
@@ -660,4 +685,6 @@ time:
 python3 et_applications.py
 ```
 
-Output files are named using the tehsil name and year, so previous results are not overwritten.
+Exported asset names are built from the tehsil name and year. If
+`export.overwrite: true` is set, an existing asset with the same name will be
+replaced.

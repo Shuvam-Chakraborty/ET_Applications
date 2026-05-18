@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 """
-ET-Applications - Pan-India ET Downscaling CLI  (GeoTIFF Raster Edition)
-=========================================================================
-Each output mode writes its own multi-band GeoTIFF (one band per month /
-derived product). All GeoTIFFs are spatially aligned at 30 m resolution
-and can be opened directly in QGIS, ArcGIS, or any rasterio/GDAL workflow.
+ET-Applications - Pan-India ET Downscaling CLI  (GEE Asset Export Edition)
+===========================================================================
+Each output mode now builds its 13-band image fully inside Earth Engine and
+exports it directly to a GEE asset. The monthly calculations are unchanged
+and the workflow is entirely server-side.
 
   PIXEL CONSISTENCY GUARANTEE
   ----------------------------
-  All GeoTIFFs produced by the same tehsil + year combination share the
-  same bounding box, CRS, and 30 m pixel grid so they are immediately
-  overlay-compatible. The AET (Landsat 8) pixel grid drives the spatial
-  reference; MODIS-derived bands are resampled to this grid before
-  download. Pixels outside the tehsil boundary are written as NoData
-  (-9999).
+  All exported assets produced by the same tehsil + year combination share
+  the same bounding box, CRS, and 30 m pixel grid. The AET (Landsat 8)
+  pixel grid drives the spatial reference; MODIS-derived bands are
+  resampled to this grid before export. Pixels outside the tehsil boundary
+  are written as NoData (-9999).
 
-  Band descriptions are embedded in every GeoTIFF so band purpose is
-  visible without consulting external documentation. Gap-fill status
-  and units are stored as TIFF metadata tags.
+  Band descriptions, gap-fill status, and valid-pixel counts are stored as
+  Earth Engine image properties on the exported assets.
 
   Core Layers + Derived Applications
   ----------------------------------
-  aet           ->  aet_<TEHSIL>_<YEAR>.tif           13 bands  (12 monthly + annual total)
-  pet           ->  pet_<TEHSIL>_<YEAR>.tif            13 bands  (12 monthly + annual total)
-  gpp           ->  gpp_<TEHSIL>_<YEAR>.tif            13 bands  (12 monthly + annual mean)
-  rwdi          ->  rwdi_<TEHSIL>_<YEAR>.tif           13 bands  (12 monthly + annual mean)
-  kc            ->  kc_<TEHSIL>_<YEAR>.tif             13 bands  (12 monthly + annual mean)
-  wue           ->  wue_<TEHSIL>_<YEAR>.tif            13 bands  (12 monthly + annual mean)
+  aet           ->  aet_<TEHSIL>_<YEAR>                13 bands  (12 monthly + annual total)
+  pet           ->  pet_<TEHSIL>_<YEAR>                13 bands  (12 monthly + annual total)
+  gpp           ->  gpp_<TEHSIL>_<YEAR>                13 bands  (12 monthly + annual mean)
+  rwdi          ->  rwdi_<TEHSIL>_<YEAR>               13 bands  (12 monthly + annual mean)
+  kc            ->  kc_<TEHSIL>_<YEAR>                 13 bands  (12 monthly + annual mean)
+  wue           ->  wue_<TEHSIL>_<YEAR>                13 bands  (12 monthly + annual mean)
   all           ->  three feature layers + three derived applications
 
   GPP Method (Light Use Efficiency)
@@ -49,21 +47,14 @@ and can be opened directly in QGIS, ArcGIS, or any rasterio/GDAL workflow.
   python3 et_applications.py --application kc
   python3 et_applications.py --application gpp
   python3 et_applications.py --application wue
-  python3 et_applications.py --application all --plot
+  python3 et_applications.py --application all
 """
 
 import argparse
 import calendar
-import contextlib
-import io
-import itertools
-import os
 import pathlib
 import sys
-import tempfile
 import time
-import warnings
-import zipfile
 
 try:
     import yaml
@@ -76,28 +67,6 @@ except ImportError:
     sys.exit(1)
 
 import ee
-import numpy as np
-
-try:
-    import requests
-except ImportError:
-    print("[ERROR] requests missing. Run: pip install requests")
-    sys.exit(1)
-
-try:
-    import rasterio
-    from rasterio.merge import merge as rio_merge
-except ImportError:
-    print("[ERROR] rasterio missing. Run: pip install rasterio")
-    sys.exit(1)
-
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-
-    HAS_MPL = True
-except ImportError:
-    HAS_MPL = False
 
 
 # ---------------------------------------------------------------------------
@@ -112,30 +81,13 @@ FEATURE_BANDS = [
 ]
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+EXPORT_BAND_NAMES = [f"b{i}" for i in range(1, 14)]
 CONFIG_PATH = pathlib.Path(__file__).parent / "config.yaml"
 MODIS_COL = "MODIS/061/MOD16A2GF"
 MCD12Q1_COL = "MODIS/061/MCD12Q1"
 
-# NoData sentinel used in GEE images and written to masked pixels in GeoTIFF.
+# NoData sentinel used in GEE images and written to masked pixels in assets.
 NODATA = -9999.0
-
-RWDI_CLASSES = [
-    (0, 30, "#228B22", "Normal / Irrigated"),
-    (30, 50, "#9ACD32", "Mild Stress"),
-    (50, 70, "#FFFF00", "Moderate Stress"),
-    (70, 80, "#FFA500", "High Stress"),
-    (80, 90, "#F08080", "Severe Stress"),
-    (90, 100, "#FF0000", "Extreme Drought"),
-]
-
-PLOT_THEME = {
-    "aet": {"line": "#2E7D32", "fill": "#81C784"},
-    "pet": {"line": "#1565C0", "fill": "#90CAF9"},
-    "rwdi": {"line": "#C62828", "fill": "#EF9A9A"},
-    "ratio": {"line": "#00897B", "fill": "#80CBC4"},
-    "gpp": {"line": "#6D4C41", "fill": "#BCAAA4"},
-    "wue": {"line": "#7B1FA2", "fill": "#CE93D8"},
-}
 
 
 # ---------------------------------------------------------------------------
@@ -166,32 +118,6 @@ BPLUT = {
 _BPLUT_DEFAULT_CLASS = 10
 
 
-# ---------------------------------------------------------------------------
-# BAND LAYOUT - combined 60-band download image for run_all()
-# ---------------------------------------------------------------------------
-# AET(12) PET(12) RWDI(12) KC(12) GPP(12)
-_AET_SLICE = slice(0, 12)       # ET_01 ... ET_12        (0.1 mm/day)
-_PET_SLICE = slice(12, 24)      # PET_01 ... PET_12      (0.1 mm/day)
-_RWDI_SLICE = slice(24, 36)     # RWDI_01 ... RWDI_12    (%)
-_KC_SLICE = slice(36, 48)       # KC_01 ... KC_12        (ratio 0-1)
-_GPP_SLICE = slice(48, 60)      # GPP_01 ... GPP_12      (g C/m2/day)
-# WUE is derived numpy-side from _GPP_SLICE / (_AET_SLICE x 0.1).
-
-
-@contextlib.contextmanager
-def _quiet_gdal():
-    """Suppress GDAL/libtiff C-level warnings printed to stderr."""
-    old_fd = os.dup(2)
-    null_fd = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(null_fd, 2)
-    os.close(null_fd)
-    try:
-        yield
-    finally:
-        os.dup2(old_fd, 2)
-        os.close(old_fd)
-
-
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -205,23 +131,18 @@ def load_config(path: pathlib.Path) -> dict:
     cfg["gee_project"] = raw.get("gee_project", "")
     tehsil = raw.get("tehsil", {}) or {}
     cfg["tehsil_name"] = tehsil.get("name", "")
-    cfg["tehsil_state"] = tehsil.get("state", "")
-    cfg["tehsil_dist"] = tehsil.get("district", "")
     assets = raw.get("assets", {}) or {}
     cfg["tehsil_asset"] = assets.get("tehsil_asset", "")
     cfg["model_aez"] = assets.get("model_aez", "")
     time_cfg = raw.get("time", {}) or {}
     cfg["year"] = int(time_cfg.get("year", 2022))
-    compute = raw.get("compute", {}) or {}
-    cfg["chunk_size"] = int(compute.get("chunk_size", 25000))
-    output = raw.get("output", {}) or {}
-    cfg["output"] = output.get("directory", "./results")
-    cfg["plot"] = bool(output.get("plot", False))
+    export = raw.get("export", {}) or {}
+    cfg["asset_root"] = export.get("asset_root", "")
+    cfg["overwrite_assets"] = bool(export.get("overwrite", False))
+    cfg["wait_exports"] = bool(export.get("wait_for_tasks", True))
+    cfg["poll_seconds"] = int(export.get("poll_interval_seconds", 30))
     cfg["application"] = raw.get("application", "all")
     cfg["modis_collection"] = (raw.get("modis", {}) or {}).get("collection", MODIS_COL)
-    sample = raw.get("sample_point", {}) or {}
-    cfg["sample_lon"] = sample.get("lon") or sample.get("longitude") or None
-    cfg["sample_lat"] = sample.get("lat") or sample.get("latitude") or None
     print(f"[config] Loaded from: {path}")
     return cfg
 
@@ -232,18 +153,15 @@ def merge_args(cfg: dict, args: argparse.Namespace) -> dict:
         ("tehsil_asset", args.tehsil_asset),
         ("model_aez", args.model_aez),
         ("year", args.year),
-        ("output", args.output),
+        ("asset_root", args.asset_root),
         ("gee_project", args.gee_project),
         ("tehsil_name", args.tehsil_name),
-        ("chunk_size", args.chunk_size),
         ("application", args.application),
-        ("sample_lon", args.sample_lon),
-        ("sample_lat", args.sample_lat),
     ]:
         if value is not None:
             merged[key] = value
-    if args.plot:
-        merged["plot"] = True
+    if args.no_wait_exports:
+        merged["wait_exports"] = False
     return merged
 
 
@@ -612,333 +530,263 @@ def build_kc_image(aet_stack: ee.Image, pet_stack: ee.Image) -> ee.Image:
     return stack
 
 
-def build_combined_image(aet_stack: ee.Image, pet_stack: ee.Image,
-                         gpp_stack: ee.Image) -> ee.Image:
-    """
-    Combine all bands into ONE 60-band image for a single-pass download.
-
-    Band layout:
-        ET_01 ... ET_12          (0.1 mm/day)
-        PET_01 ... PET_12        (0.1 mm/day)
-        RWDI_01 ... RWDI_12      (%)
-        KC_01 ... KC_12          (0-1)
-        GPP_01 ... GPP_12        (g C/m2/day)
-        WUE derived from GPP/AET in Python.
-    """
-    rwdi_img = build_rwdi_image(aet_stack, pet_stack)
-    kc_img = build_kc_image(aet_stack, pet_stack)
-
-    return (
-        aet_stack
-        .addBands(pet_stack.unmask(NODATA))
-        .addBands(rwdi_img.unmask(NODATA))
-        .addBands(kc_img.unmask(NODATA))
-        .addBands(gpp_stack.unmask(NODATA))
-    )
-
-
 # =============================================================================
-# NUMPY HELPERS
+# GEE EXPORT HELPERS
 # =============================================================================
 
-def compute_wue_numpy(gpp_monthly: np.ndarray,
-                      aet_monthly_raw: np.ndarray,
-                      nodata: float = NODATA) -> np.ndarray:
-    """
-    Compute WUE pixel-wise from downloaded numpy arrays.
+def _asset_token(value: str) -> str:
+    cleaned = []
+    for char in str(value).strip().lower():
+        cleaned.append(char if char.isalnum() else "_")
+    token = "".join(cleaned).strip("_")
+    while "__" in token:
+        token = token.replace("__", "_")
+    return token or "unknown"
 
-        WUE = GPP / AET_mm     (g C / kg H2O)
 
-    GPP is in g C / m2 / day.
-    AET is in raw 0.1 mm/day and is converted to mm/day here.
-    """
-    aet_mm = aet_monthly_raw.astype(np.float64) * 0.1
+def _build_asset_id(cfg: dict, label: str) -> str:
+    root = str(cfg.get("asset_root", "")).rstrip("/")
+    if not root:
+        raise ValueError("asset_root is required (config.yaml export.asset_root or --asset-root)")
+    tehsil = _asset_token(cfg.get("tehsil_name", "tehsil"))
+    year = int(cfg["year"])
+    return f"{root}/{label}_{tehsil}_{year}"
 
-    bad_aet = ((aet_monthly_raw == nodata) | np.isnan(aet_monthly_raw) |
-               np.isinf(aet_monthly_raw))
-    bad_gpp = ((gpp_monthly == nodata) | np.isnan(gpp_monthly) |
-               np.isinf(gpp_monthly))
-    bad = bad_aet | bad_gpp | (aet_mm <= 0)
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        wue = np.where(
-            bad,
-            nodata,
-            gpp_monthly.astype(np.float64) / np.where(aet_mm > 0, aet_mm, 1.0),
+def _asset_exists(asset_id: str) -> bool:
+    try:
+        ee.data.getAsset(asset_id)
+        return True
+    except Exception:
+        return False
+
+
+def _prepare_asset_target(asset_id: str, overwrite: bool) -> None:
+    if not _asset_exists(asset_id):
+        return
+    if not overwrite:
+        raise RuntimeError(
+            f"GEE asset already exists: {asset_id}\n"
+            "Set export.overwrite: true in config.yaml to replace it."
         )
+    print(f"  Overwriting existing asset -> {asset_id}")
+    ee.data.deleteAsset(asset_id)
 
-    wue = np.where((wue != nodata) & ((wue < 0) | (wue > 50)), nodata, wue)
-    return wue.astype(np.float32)
+
+def _reduce_region_kwargs(proj_info: dict) -> dict:
+    kwargs = {
+        "scale": 30,
+        "maxPixels": 1e13,
+    }
+    crs = proj_info.get("crs")
+    if crs:
+        kwargs["crs"] = crs
+    return kwargs
 
 
-# =============================================================================
-# GEOTIFF DOWNLOAD INFRASTRUCTURE
-# =============================================================================
-
-def _download_image_as_geotiff(img: ee.Image, region: ee.Geometry,
-                               chunk_size: int = 25000, label: str = "") -> list:
-    """
-    Tile the tehsil bounding box and download each tile as a GeoTIFF via
-    ee.Image.getDownloadURL().
-    """
-    bbox = region.bounds().getInfo()["coordinates"][0]
-    lons = [coord[0] for coord in bbox]
-    lats = [coord[1] for coord in bbox]
-    min_lon, max_lon = min(lons), max(lons)
-    min_lat, max_lat = min(lats), max(lats)
-
-    deg_per_px = 0.00027
-    tile_side = (chunk_size ** 0.5) * deg_per_px
-    lon_tiles = max(1, int(np.ceil((max_lon - min_lon) / tile_side)))
-    lat_tiles = max(1, int(np.ceil((max_lat - min_lat) / tile_side)))
-    lon_step = (max_lon - min_lon) / lon_tiles
-    lat_step = (max_lat - min_lat) / lat_tiles
-    total_tiles = lon_tiles * lat_tiles
-
-    tag = f"[{label}]" if label else "[download]"
-    print(
-        f"  {tag} Tiling: {lon_tiles} x {lat_tiles} = {total_tiles} tiles "
-        f"(chunk ~= {chunk_size:,} px each)"
+def _build_common_pixel_mask(region: ee.Geometry,
+                             default_proj: ee.Projection) -> ee.Image:
+    """Rasterize the tehsil once on the chosen 30 m grid for all outputs."""
+    return (
+        ee.Image.constant(1)
+        .rename("common_mask")
+        .setDefaultProjection(default_proj)
+        .clip(region)
+        .unmask(0)
+        .gt(0)
+        .selfMask()
     )
 
-    region_geojson = region.getInfo()
-    tile_paths = []
-    tile_count = 0
-    skipped = 0
 
-    empty_geom_msgs = (
-        "geometry for image clipping must not be empty",
-        "empty geometry",
-        "no data",
-    )
-    fatal_expr_msgs = (
-        "invalid interpolation mode",
-        "image.resample:",
-        "pattern '",
-        "band pattern",
-        "no band named",
-        "dictionary does not contain key",
-    )
-
-    for i, j in itertools.product(range(lon_tiles), range(lat_tiles)):
-        x0 = min_lon + i * lon_step
-        x1 = x0 + lon_step
-        y0 = min_lat + j * lat_step
-        y1 = y0 + lat_step
-
-        try:
-            from shapely.geometry import shape, box as shapely_box
-
-            tehsil_shape = shape(region_geojson)
-            tile_shape = shapely_box(x0, y0, x1, y1)
-            if not tehsil_shape.intersects(tile_shape):
-                skipped += 1
-                continue
-        except ImportError:
-            pass
-
-        tile_rect = ee.Geometry.Rectangle([x0, y0, x1, y1])
-        tile_geom = tile_rect.intersection(region, 1)
-
-        try:
-            area = tile_geom.area(10).getInfo()
-            if area < 100:
-                skipped += 1
-                continue
-        except Exception:
-            skipped += 1
-            continue
-
-        tile_count += 1
-        data = None
-
-        for attempt in range(4):
-            try:
-                url = img.getDownloadURL({
-                    "scale": 30,
-                    "region": tile_geom,
-                    "format": "GEO_TIFF",
-                    "filePerBand": False,
-                })
-                resp = requests.get(url, timeout=300)
-                resp.raise_for_status()
-                data = resp.content
-                break
-            except Exception as exc:
-                exc_str = str(exc).lower()
-                if any(msg in exc_str for msg in empty_geom_msgs):
-                    break
-                if any(msg in exc_str for msg in fatal_expr_msgs):
-                    raise RuntimeError(
-                        "Earth Engine image expression error detected before tile "
-                        f"download could proceed: {exc}"
-                    ) from exc
-                if attempt == 3:
-                    print(f"  [WARN] Tile ({i},{j}) failed after 4 attempts: {exc}")
-                    break
-                wait = 2 ** attempt
-                print(f"  [retry {attempt + 1}] tile ({i},{j}): {exc} - waiting {wait}s")
-                time.sleep(wait)
-
-        if data is None:
-            continue
-
-        if data[:2] == b"PK":
-            try:
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                    tif_names = [name for name in zf.namelist() if name.lower().endswith(".tif")]
-                    if not tif_names:
-                        print(f"  [WARN] Tile ({i},{j}): ZIP has no .tif files")
-                        continue
-                    data = zf.read(tif_names[0])
-            except Exception as exc:
-                print(f"  [WARN] Tile ({i},{j}): could not unzip: {exc}")
-                continue
-
-        tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
-        try:
-            tmp.write(data)
-        finally:
-            tmp.close()
-        tile_paths.append(tmp.name)
-
-        if tile_count % 10 == 0 or (tile_count + skipped) == total_tiles:
-            print(
-                f"  Progress: {tile_count + skipped}/{total_tiles} checked "
-                f"| {tile_count} downloaded | {skipped} skipped (no overlap) "
-                f"| {len(tile_paths)} saved",
-                flush=True,
-            )
-
-    return tile_paths
+def _ee_annual_total_band(monthly_stack: ee.Image, prefix: str, year: int,
+                          band_name: str = "annual") -> ee.Image:
+    annual = ee.Image.constant(0).float()
+    valid_count = ee.Image.constant(0).float()
+    for month in range(1, 13):
+        month_band = monthly_stack.select(f"{prefix}_{month:02d}")
+        days = calendar.monthrange(year, month)[1]
+        annual = annual.add(month_band.unmask(0).multiply(days))
+        valid_count = valid_count.add(month_band.mask().gt(0).unmask(0))
+    return annual.updateMask(valid_count.gt(0)).rename(band_name).float()
 
 
-def _merge_tiles(tile_paths: list, nodata: float = NODATA):
-    """
-    Mosaic tile GeoTIFFs into a single array using rasterio.merge.
-    Returns (mosaic_float32, profile) or (None, None) on failure.
-    """
-    datasets, bad = [], []
-    for path in tile_paths:
-        try:
-            with _quiet_gdal():
-                datasets.append(rasterio.open(path))
-        except Exception as exc:
-            print(f"  [WARN] Cannot open tile {path}: {exc}")
-            bad.append(path)
+def _ee_annual_mean_band(monthly_stack: ee.Image, prefix: str,
+                         band_name: str = "annual") -> ee.Image:
+    images = [
+        monthly_stack.select(f"{prefix}_{month:02d}").rename("annual_src").float()
+        for month in range(1, 13)
+    ]
+    return ee.ImageCollection.fromImages(images).mean().rename(band_name).float()
 
-    result = (None, None)
-    if datasets:
-        try:
-            with _quiet_gdal():
-                mosaic, transform = rio_merge(datasets, nodata=nodata)
-            profile = datasets[0].profile.copy()
-            profile.update({
-                "height": mosaic.shape[1],
-                "width": mosaic.shape[2],
-                "transform": transform,
-                "nodata": nodata,
-                "count": mosaic.shape[0],
-                "compress": "lzw",
-                "driver": "GTiff",
-                "dtype": "float32",
-            })
-            result = (mosaic.astype("float32"), profile)
-        except Exception as exc:
-            print(f"  [ERROR] rasterio merge failed: {exc}")
+
+def build_wue_image(aet_stack: ee.Image, gpp_stack: ee.Image) -> ee.Image:
+    """WUE_01...12 = GPP / AET_mm (g C / kg H2O)."""
+    bands = []
+    for month in range(1, 13):
+        aet_mm = aet_stack.select(f"ET_{month:02d}").multiply(0.1)
+        wue = (
+            gpp_stack.select(f"GPP_{month:02d}")
+            .divide(aet_mm)
+            .updateMask(aet_mm.gt(0))
+        )
+        wue = wue.updateMask(wue.gte(0)).updateMask(wue.lte(50))
+        bands.append(wue.rename(f"WUE_{month:02d}").float())
+    stack = bands[0]
+    for band in bands[1:]:
+        stack = stack.addBands(band)
+    return stack
+
+
+def _apply_image_properties(img: ee.Image, props: dict) -> ee.Image:
+    out = img
+    for key, value in props.items():
+        out = out.set(key, value)
+    return out
+
+
+def _finalize_export_image(monthly_stack: ee.Image, annual_band: ee.Image,
+                           region: ee.Geometry, metadata: dict,
+                           band_descriptions: list,
+                           default_proj: ee.Projection = None,
+                           common_mask: ee.Image = None) -> ee.Image:
+    image = monthly_stack.addBands(annual_band).rename(EXPORT_BAND_NAMES)
+    if default_proj is not None:
+        image = image.setDefaultProjection(default_proj)
+    if common_mask is not None:
+        image = image.updateMask(common_mask)
     else:
-        print("  [ERROR] No valid tile datasets to merge.")
-
-    for ds in datasets:
-        ds.close()
-    for path in tile_paths + bad:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-
-    return result
+        image = image.clip(region)
+    image = image.unmask(NODATA).float()
+    props = {"nodata": NODATA}
+    props.update(metadata)
+    for idx, desc in enumerate(band_descriptions, start=1):
+        props[f"band_{idx}_description"] = desc
+    return _apply_image_properties(image, props)
 
 
-def _save_geotiff(arr: np.ndarray, profile: dict, output_path: str,
-                  band_names: list = None, metadata: dict = None) -> None:
-    """
-    Write a numpy array (n_bands, H, W) as a GeoTIFF.
-    band_names are embedded as band descriptions.
-    metadata dict is stored as TIFF tags.
-    """
-    profile = profile.copy()
-    profile.update({
-        "count": arr.shape[0],
-        "dtype": "float32",
-        "compress": "lzw",
-        "photometric": "MINISBLACK",
-    })
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+def _count_mask_pixels(mask_image: ee.Image, region: ee.Geometry,
+                       proj_info: dict) -> int:
+    stats = mask_image.reduceRegion(
+        reducer=ee.Reducer.count(),
+        geometry=region,
+        **_reduce_region_kwargs(proj_info),
+    ).getInfo() or {}
+    return int(round(float(stats.get("common_mask", 0))))
 
-    with rasterio.open(output_path, "w", **profile) as dst:
-        dst.write(arr.astype("float32"))
-        if band_names:
-            for idx, name in enumerate(band_names, 1):
-                dst.set_band_description(idx, name)
-        if metadata:
-            dst.update_tags(**metadata)
 
-    n_bands, height, width = arr.shape
-    size_mb = os.path.getsize(output_path) / 1e6
-    band0 = arr[0]
-    valid_mask = ~((band0 == NODATA) | np.isnan(band0) | np.isinf(band0))
-    valid_count = int(np.count_nonzero(valid_mask))
-    print(f"  GeoTIFF saved -> {output_path}")
-    print(
-        f"    {n_bands} band(s) | {height}x{width} px grid | "
-        f"{valid_count:,} valid pixels (band 1) | {size_mb:.1f} MB"
+def _count_valid_pixels(image: ee.Image, region: ee.Geometry, proj_info: dict,
+                        band_name: str = "b1") -> int:
+    valid = image.select(band_name).updateMask(image.select(band_name).neq(NODATA))
+    stats = valid.reduceRegion(
+        reducer=ee.Reducer.count(),
+        geometry=region,
+        **_reduce_region_kwargs(proj_info),
+    ).getInfo() or {}
+    return int(round(float(stats.get(band_name, 0))))
+
+
+def _get_band_summary_stats(image: ee.Image, region: ee.Geometry,
+                            proj_info: dict, band_name: str = "b13") -> dict:
+    reducer = (
+        ee.Reducer.count()
+        .combine(reducer2=ee.Reducer.mean(), sharedInputs=True)
+        .combine(reducer2=ee.Reducer.minMax(), sharedInputs=True)
+        .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True)
     )
+    clean = image.select(band_name).updateMask(image.select(band_name).neq(NODATA))
+    stats = clean.reduceRegion(
+        reducer=reducer,
+        geometry=region,
+        **_reduce_region_kwargs(proj_info),
+    ).getInfo() or {}
+    prefix = band_name
+    return {
+        "count": int(round(float(stats.get(f"{prefix}_count", 0)))),
+        "mean": float(stats.get(f"{prefix}_mean", float("nan"))),
+        "min": float(stats.get(f"{prefix}_min", float("nan"))),
+        "max": float(stats.get(f"{prefix}_max", float("nan"))),
+        "stdDev": float(stats.get(f"{prefix}_stdDev", float("nan"))),
+    }
 
 
-def _scale_nodata(arr: np.ndarray, scale: float, nodata: float = NODATA) -> np.ndarray:
-    """
-    Multiply arr by scale while preserving nodata pixels.
-    Also clamps +/-inf and extreme RF outliers to nodata.
-    """
-    out = arr.astype(np.float64).copy()
-    mask = (arr == nodata) | np.isnan(arr) | np.isinf(arr)
-    out = out * scale
-    out[mask] = nodata
-    out = np.where((out < -1e6) | (out > 1e6), nodata, out)
-    return out.astype(np.float32)
+def _print_asset_stats_from_summary(label: str, summary: dict,
+                                    band_label: str = None) -> None:
+    count = int(summary.get("count", 0))
+    if count == 0:
+        print(f"\n  {label}: no valid data")
+        return
+    print(f"\n  {label}")
+    if band_label:
+        print(f"    Valid pixels ({band_label}) : {count:,}")
+    else:
+        print(f"    Valid pixels : {count:,}")
+    print(f"    Mean : {float(summary['mean']):.4f}")
+    print(f"    Min  : {float(summary['min']):.4f}")
+    print(f"    Max  : {float(summary['max']):.4f}")
+    print(f"    Std  : {float(summary['stdDev']):.4f}")
 
 
-def _annual_mean_band(monthly_12: np.ndarray, nodata: float = NODATA) -> np.ndarray:
-    """
-    Compute pixel-wise annual mean from 12 monthly bands.
-    shape in: (12, H, W) -> shape out: (1, H, W)
-    """
-    bad = (monthly_12 == nodata) | np.isnan(monthly_12) | np.isinf(monthly_12)
-    valid = np.where(bad, np.nan, monthly_12.astype(np.float64))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        annual = np.nanmean(valid, axis=0)
-    annual = np.where(np.isnan(annual), nodata, annual).astype(np.float32)
-    return annual[np.newaxis, :]
+def _start_asset_export(image: ee.Image, asset_id: str, region: ee.Geometry,
+                        proj_info: dict, description: str):
+    export_kwargs = {
+        "image": image,
+        "description": description,
+        "assetId": asset_id,
+        "region": region.coordinates().getInfo(),
+        "scale": 30,
+        "maxPixels": 1e13,
+    }
+    task = ee.batch.Export.image.toAsset(**export_kwargs)
+    task.start()
+    print(f"  Export task started -> {asset_id}")
+    return task
 
 
-def _annual_total_band(monthly_12: np.ndarray, year: int,
-                       nodata: float = NODATA) -> np.ndarray:
-    """
-    Compute pixel-wise annual total from 12 monthly mean-daily bands.
-    shape in: (12, H, W) -> shape out: (1, H, W)
-    """
-    days = np.array(
-        [calendar.monthrange(year, month)[1] for month in range(1, 13)],
-        dtype=np.float32,
-    )[:, np.newaxis, np.newaxis]
-    bad = (monthly_12 == nodata) | np.isnan(monthly_12) | np.isinf(monthly_12)
-    valid = np.where(bad, np.nan, monthly_12.astype(np.float64))
-    annual = np.nansum(valid * days, axis=0)
-    all_bad = np.all(np.isnan(valid), axis=0)
-    annual = np.where(all_bad, nodata, annual).astype(np.float32)
-    return annual[np.newaxis, :]
+def _wait_for_tasks(task_specs: list, poll_seconds: int = 30) -> None:
+    if not task_specs:
+        return
+    poll_seconds = max(5, int(poll_seconds))
+    pending = {spec["asset_id"]: spec for spec in task_specs}
+    print(f"\n[exports] Waiting for {len(task_specs)} Earth Engine task(s) ...")
+    while pending:
+        finished_now = []
+        for asset_id, spec in pending.items():
+            status = spec["task"].status()
+            state = status.get("state", "UNKNOWN")
+            if state in {"COMPLETED", "FAILED", "CANCELLED", "CANCEL_REQUESTED"}:
+                finished_now.append(asset_id)
+                print(f"  [{state}] {spec['label']} -> {asset_id}")
+                if status.get("error_message"):
+                    print(f"    Error: {status['error_message']}")
+        for asset_id in finished_now:
+            pending.pop(asset_id, None)
+        if pending:
+            print(f"  Still running: {len(pending)} task(s). Checking again in {poll_seconds}s ...")
+            time.sleep(poll_seconds)
+
+
+def _export_product_asset(label: str, display_name: str, image: ee.Image,
+                          cfg: dict, export_region: ee.Geometry,
+                          proj_info: dict, stats_label: str,
+                          fixed_pixel_count: int = None) -> dict:
+    asset_id = _build_asset_id(cfg, label)
+    _prepare_asset_target(asset_id, bool(cfg.get("overwrite_assets", False)))
+    band13_summary = _get_band_summary_stats(image, export_region, proj_info, band_name="b13")
+    band13_valid_pixels = band13_summary["count"]
+    image = image.set("valid_pixel_count", band13_valid_pixels)
+    if fixed_pixel_count is not None:
+        image = image.set("grid_pixel_count", fixed_pixel_count)
+    print(f"  {display_name} asset -> {asset_id}")
+    print(f"    Valid pixels          : {band13_valid_pixels:,}")
+    _print_asset_stats_from_summary(stats_label, band13_summary)
+    task = _start_asset_export(
+        image,
+        asset_id,
+        export_region,
+        proj_info,
+        description=f"export_{label}_{_asset_token(cfg['tehsil_name'])}_{cfg['year']}",
+    )
+    return {"asset_id": asset_id, "task": task, "label": label}
 
 
 # =============================================================================
@@ -959,42 +807,6 @@ def _check_landsat(region, year):
         sys.exit(1)
 
 
-def _print_stats(label: str, arr: np.ndarray, nodata: float = NODATA):
-    """Print pixel count + min/mean/max/std, excluding NoData and +/-inf."""
-    good = ~((arr == nodata) | np.isnan(arr) | np.isinf(arr))
-    valid = arr[good].astype(np.float64)
-    if valid.size == 0:
-        print(f"\n  {label}: no valid data")
-        return
-    print(f"\n  {label}")
-    print(f"    Valid pixels : {valid.size:,}")
-    print(f"    Mean : {np.mean(valid):.4f}")
-    print(f"    Min  : {np.min(valid):.4f}")
-    print(f"    Max  : {np.max(valid):.4f}")
-    print(f"    Std  : {np.std(valid):.4f}")
-
-
-def _valid_pixels(arr: np.ndarray, nodata: float = NODATA) -> np.ndarray:
-    """Return a masked numpy array (nodata -> nan)."""
-    out = arr.astype(np.float64).copy()
-    out[(out == nodata) | np.isnan(out)] = np.nan
-    return out
-
-
-def _make_valid_mask_2d(arr: np.ndarray, nodata: float = NODATA) -> np.ndarray:
-    """Return a 2D boolean valid-data mask from a single raster band."""
-    return ~((arr == nodata) | np.isnan(arr) | np.isinf(arr))
-
-
-def _apply_2d_mask(arr: np.ndarray, valid_mask: np.ndarray,
-                   nodata: float = NODATA) -> np.ndarray:
-    """Apply one common spatial mask to every band of an array."""
-    out = arr.astype(np.float32).copy()
-    if out.ndim == 2:
-        return np.where(valid_mask, out, nodata).astype(np.float32)
-    return np.where(valid_mask[np.newaxis, :, :], out, nodata).astype(np.float32)
-
-
 # =============================================================================
 # CORE LAYER 1 - AET
 # =============================================================================
@@ -1003,13 +815,10 @@ def run_aet(cfg: dict, region: ee.Geometry,
             aet_stack=None, gap_flags=None) -> str:
     """
     Monthly mean daily AET for every 30 m pixel.
-    Output  : aet_<TEHSIL>_<YEAR>.tif  (13 bands)
-    Bands   : ET_Jan_daily_mm ... ET_Dec_daily_mm, ET_annual_mm
+    Output  : aet_<tehsil>_<year> GEE asset (13 bands)
     """
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
-    outdir = cfg["output"]
-    chunk_size = cfg.get("chunk_size", 25000)
 
     print(f"\n{'=' * 60}")
     print(f"  [aet]  {tehsil}  |  {year}")
@@ -1021,39 +830,49 @@ def run_aet(cfg: dict, region: ee.Geometry,
         _check_landsat(region, year)
         aet_stack, gap_flags = build_aet_stack(region, classifier, year)
 
-    print("  Downloading pixel data (AET stack, 12 bands) ...")
-    tile_paths = _download_image_as_geotiff(aet_stack, region, chunk_size, "aet")
-    mosaic, profile = _merge_tiles(tile_paths)
-    if mosaic is None:
-        return None
-
-    et_data = _scale_nodata(mosaic, scale=0.1)
-    aet_annual_total = _annual_total_band(et_data, year)
-    aet_data = np.concatenate([et_data, aet_annual_total], axis=0)
-    band_names = [f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"]
     gap_months = [MONTH_ABBR[i] for i, gap in enumerate(gap_flags or []) if gap]
-
-    out_path = os.path.join(outdir, f"aet_{tehsil}_{year}.tif")
-    _save_geotiff(
-        aet_data,
-        profile,
-        out_path,
-        band_names=band_names,
+    grid_proj = aet_stack.select("ET_01").projection()
+    proj_info = grid_proj.getInfo()
+    export_region = region.bounds(1)
+    common_mask = _build_common_pixel_mask(region, grid_proj)
+    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
+    aet_monthly = aet_stack.multiply(0.1)
+    footprint = aet_monthly.select("ET_01").mask()
+    aet_annual_total = (
+        _ee_annual_total_band(aet_monthly, "ET", year, band_name="ET_annual")
+        .updateMask(footprint)
+    )
+    image = _finalize_export_image(
+        aet_monthly,
+        aet_annual_total,
+        region,
         metadata={
+            "application": "aet",
             "units": "bands 1-12: mm/day; band 13: mm/yr",
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
+            "model_aez": cfg["model_aez"],
             "gap_filled_months": ",".join(gap_months) or "none",
             "description": "Bands 1-12: mean daily AET per month at 30 m; band 13: annual total AET",
         },
+        band_descriptions=[f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    _print_stats("Monthly AET (mm/day) - all months / all pixels", et_data)
-    _print_stats("Annual ET (mm/yr)", aet_annual_total)
-
-    if cfg.get("plot"):
-        _plot_aet(et_data, tehsil, year, outdir)
-
-    return out_path
+    task_spec = _export_product_asset(
+        "aet",
+        "AET",
+        image,
+        cfg,
+        export_region,
+        proj_info,
+        "Annual ET (mm/yr)",
+        fixed_pixel_count=common_pixel_count,
+    )
+    if cfg.get("wait_exports", True):
+        _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
+    return task_spec["asset_id"]
 
 
 # =============================================================================
@@ -1064,12 +883,10 @@ def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
             gap_flags=None, pet_stack=None) -> str:
     """
     Monthly mean daily PET (MODIS MOD16A2) for every 30 m pixel.
-    Output  : pet_<TEHSIL>_<YEAR>.tif  (13 bands)
+    Output  : pet_<tehsil>_<year> GEE asset (13 bands)
     """
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
-    outdir = cfg["output"]
-    chunk_size = cfg.get("chunk_size", 25000)
     modis_col = cfg.get("modis_collection", MODIS_COL)
 
     print(f"\n{'=' * 60}")
@@ -1087,42 +904,45 @@ def run_pet(cfg: dict, region: ee.Geometry, aet_stack=None,
         proj = _get_proj_30m(region, year)
         pet_stack = build_pet_stack(region, year, modis_col, proj)
 
-    carrier = aet_stack.select("ET_01").rename("_carrier")
-    img_to_dl = carrier.addBands(pet_stack.unmask(NODATA))
-
-    print("  Downloading pixel data (AET carrier + PET, 13 bands) ...")
-    tile_paths = _download_image_as_geotiff(img_to_dl, region, chunk_size, "pet")
-    mosaic, profile = _merge_tiles(tile_paths)
-    if mosaic is None:
-        return None
-
-    footprint_mask = _make_valid_mask_2d(mosaic[0])
-    pet_monthly = _apply_2d_mask(_scale_nodata(mosaic[1:], scale=0.1), footprint_mask)
-    pet_annual = _annual_total_band(pet_monthly, year)
-    pet_data = np.concatenate([pet_monthly, pet_annual], axis=0)
-    band_names = [f"PET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["PET_annual_mm"]
-
-    out_path = os.path.join(outdir, f"pet_{tehsil}_{year}.tif")
-    _save_geotiff(
-        pet_data,
-        profile,
-        out_path,
-        band_names=band_names,
+    grid_proj = aet_stack.select("ET_01").projection()
+    proj_info = grid_proj.getInfo()
+    export_region = region.bounds(1)
+    common_mask = _build_common_pixel_mask(region, grid_proj)
+    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
+    footprint = aet_stack.select("ET_01").mask()
+    pet_monthly = pet_stack.multiply(0.1).updateMask(footprint)
+    pet_annual = _ee_annual_total_band(pet_monthly, "PET", year, band_name="PET_annual").updateMask(footprint)
+    image = _finalize_export_image(
+        pet_monthly,
+        pet_annual,
+        region,
         metadata={
+            "application": "pet",
             "units": "bands 1-12: mm/day; band 13: mm/yr",
             "source": "MODIS MOD16A2",
+            "modis_collection": modis_col,
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "description": "Bands 1-12: mean daily PET per month at 30 m; band 13: annual total PET",
         },
+        band_descriptions=[f"PET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["PET_annual_mm"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    _print_stats("Monthly PET (mm/day) - all months / all pixels", pet_monthly)
-    _print_stats("Annual PET (mm/yr)", pet_annual)
-
-    if cfg.get("plot"):
-        _plot_pet(pet_monthly, tehsil, year, outdir)
-
-    return out_path
+    task_spec = _export_product_asset(
+        "pet",
+        "PET",
+        image,
+        cfg,
+        export_region,
+        proj_info,
+        "Annual PET (mm/yr)",
+        fixed_pixel_count=common_pixel_count,
+    )
+    if cfg.get("wait_exports", True):
+        _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
+    return task_spec["asset_id"]
 
 
 # =============================================================================
@@ -1133,12 +953,10 @@ def run_rwdi(cfg: dict, region: ee.Geometry, aet_stack=None,
              gap_flags=None, pet_stack=None) -> str:
     """
     RWDI = (1 - AET/PET) x 100 (%)
-    Output  : rwdi_<TEHSIL>_<YEAR>.tif  (13 bands)
+    Output  : rwdi_<tehsil>_<year> GEE asset (13 bands)
     """
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
-    outdir = cfg["output"]
-    chunk_size = cfg.get("chunk_size", 25000)
     modis_col = cfg.get("modis_collection", MODIS_COL)
 
     print(f"\n{'=' * 60}")
@@ -1157,41 +975,45 @@ def run_rwdi(cfg: dict, region: ee.Geometry, aet_stack=None,
         pet_stack = build_pet_stack(region, year, modis_col, proj)
 
     rwdi_img = build_rwdi_image(aet_stack, pet_stack)
-    carrier = aet_stack.select("ET_01").rename("_carrier")
-    img_to_dl = carrier.addBands(rwdi_img.unmask(NODATA))
-
-    print("  Downloading pixel data (AET carrier + RWDI, 13 bands) ...")
-    tile_paths = _download_image_as_geotiff(img_to_dl, region, chunk_size, "rwdi")
-    mosaic, profile = _merge_tiles(tile_paths)
-    if mosaic is None:
-        return None
-
-    footprint_mask = _make_valid_mask_2d(mosaic[0])
-    rwdi_monthly = _apply_2d_mask(mosaic[1:], footprint_mask)
-    rwdi_annual = _annual_mean_band(rwdi_monthly)
-    rwdi_data = np.concatenate([rwdi_monthly, rwdi_annual], axis=0)
-
-    out_path = os.path.join(outdir, f"rwdi_{tehsil}_{year}.tif")
-    profile.update({"count": 13})
-    _save_geotiff(
-        rwdi_data,
-        profile,
-        out_path,
-        band_names=[f"RWDI_{abbr}" for abbr in MONTH_ABBR] + ["RWDI_annual"],
+    grid_proj = aet_stack.select("ET_01").projection()
+    proj_info = grid_proj.getInfo()
+    export_region = region.bounds(1)
+    common_mask = _build_common_pixel_mask(region, grid_proj)
+    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
+    footprint = aet_stack.select("ET_01").mask()
+    rwdi_monthly = rwdi_img.updateMask(footprint)
+    rwdi_annual = _ee_annual_mean_band(rwdi_monthly, "RWDI", band_name="RWDI_annual").updateMask(footprint)
+    image = _finalize_export_image(
+        rwdi_monthly,
+        rwdi_annual,
+        region,
         metadata={
+            "application": "rwdi",
             "units": "percent",
             "formula": "(1 - AET/PET) * 100",
+            "modis_collection": modis_col,
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "description": "Relative Water Deficit Index per month + annual mean",
         },
+        band_descriptions=[f"RWDI_{abbr}" for abbr in MONTH_ABBR] + ["RWDI_annual"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    _print_stats("Annual mean RWDI (%)", rwdi_annual)
-
-    if cfg.get("plot"):
-        _plot_rwdi(rwdi_monthly, tehsil, year, outdir)
-
-    return out_path
+    task_spec = _export_product_asset(
+        "rwdi",
+        "RWDI",
+        image,
+        cfg,
+        export_region,
+        proj_info,
+        "Annual mean RWDI (%)",
+        fixed_pixel_count=common_pixel_count,
+    )
+    if cfg.get("wait_exports", True):
+        _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
+    return task_spec["asset_id"]
 
 
 def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
@@ -1199,22 +1021,21 @@ def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
     """Shared runner for the monthly Kc proxy (AET/PET)."""
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
-    outdir = cfg["output"]
-    chunk_size = cfg.get("chunk_size", 25000)
     modis_col = cfg.get("modis_collection", MODIS_COL)
     label = "kc"
     title = "Crop Coefficient (Kc)"
     stack_builder = build_kc_image
     band_names = [f"KC_{abbr}" for abbr in MONTH_ABBR] + ["KC_annual"]
-    output_name = f"kc_{tehsil}_{year}.tif"
     metadata = {
+        "application": "kc",
         "units": "ratio (AET/PET)",
         "formula": "AET / PET",
+        "modis_collection": modis_col,
         "year": str(year),
         "tehsil": tehsil,
+        "tehsil_asset": cfg["tehsil_asset"],
         "description": "Monthly Kc proxy from AET/PET + annual mean",
     }
-    plotter = _plot_kc
 
     print(f"\n{'=' * 60}")
     print(f"  [{label}]  {tehsil}  |  {year}")
@@ -1232,29 +1053,36 @@ def _run_kc_application(cfg: dict, region: ee.Geometry, aet_stack=None,
         pet_stack = build_pet_stack(region, year, modis_col, proj)
 
     ratio_img = stack_builder(aet_stack, pet_stack)
-    carrier = aet_stack.select("ET_01").rename("_carrier")
-    img_to_dl = carrier.addBands(ratio_img.unmask(NODATA))
-
-    print(f"  Downloading pixel data (AET carrier + {title}, 13 bands) ...")
-    tile_paths = _download_image_as_geotiff(img_to_dl, region, chunk_size, label)
-    mosaic, profile = _merge_tiles(tile_paths)
-    if mosaic is None:
-        return None
-
-    footprint_mask = _make_valid_mask_2d(mosaic[0])
-    ratio_monthly = _apply_2d_mask(mosaic[1:], footprint_mask)
-    ratio_annual = _annual_mean_band(ratio_monthly)
-    ratio_data = np.concatenate([ratio_monthly, ratio_annual], axis=0)
-
-    out_path = os.path.join(outdir, output_name)
-    profile.update({"count": 13})
-    _save_geotiff(ratio_data, profile, out_path, band_names=band_names, metadata=metadata)
-    _print_stats(f"Annual mean {title}", ratio_annual)
-
-    if cfg.get("plot"):
-        plotter(ratio_monthly, tehsil, year, outdir)
-
-    return out_path
+    grid_proj = aet_stack.select("ET_01").projection()
+    proj_info = grid_proj.getInfo()
+    export_region = region.bounds(1)
+    common_mask = _build_common_pixel_mask(region, grid_proj)
+    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
+    footprint = aet_stack.select("ET_01").mask()
+    ratio_monthly = ratio_img.updateMask(footprint)
+    ratio_annual = _ee_annual_mean_band(ratio_monthly, "KC", band_name="KC_annual").updateMask(footprint)
+    image = _finalize_export_image(
+        ratio_monthly,
+        ratio_annual,
+        region,
+        metadata=metadata,
+        band_descriptions=band_names,
+        default_proj=grid_proj,
+        common_mask=common_mask,
+    )
+    task_spec = _export_product_asset(
+        label,
+        title,
+        image,
+        cfg,
+        export_region,
+        proj_info,
+        f"Annual mean {title}",
+        fixed_pixel_count=common_pixel_count,
+    )
+    if cfg.get("wait_exports", True):
+        _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
+    return task_spec["asset_id"]
 
 
 # =============================================================================
@@ -1265,7 +1093,7 @@ def run_kc(cfg: dict, region: ee.Geometry, aet_stack=None,
            gap_flags=None, pet_stack=None) -> str:
     """
     Kc proxy = AET / PET
-    Output  : kc_<TEHSIL>_<YEAR>.tif  (13 bands)
+    Output  : kc_<tehsil>_<year> GEE asset (13 bands)
     """
     return _run_kc_application(cfg, region, aet_stack=aet_stack,
                                gap_flags=gap_flags, pet_stack=pet_stack)
@@ -1284,8 +1112,6 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
     """
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
-    outdir = cfg["output"]
-    chunk_size = cfg.get("chunk_size", 25000)
 
     print(f"\n{'=' * 60}")
     print(f"  [gpp]  {tehsil}  |  {year}")
@@ -1302,28 +1128,20 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
         proj = _get_proj_30m(region, year)
         gpp_stack = build_gpp_stack(region, year, proj)
 
-    carrier = aet_stack.select("ET_01").rename("_carrier")
-    img_to_dl = carrier.addBands(gpp_stack.unmask(NODATA))
-
-    print("  Downloading pixel data (carrier + GPP, 13 bands) ...")
-    tile_paths = _download_image_as_geotiff(img_to_dl, region, chunk_size, "gpp")
-    mosaic, profile = _merge_tiles(tile_paths)
-    if mosaic is None:
-        return None
-
-    footprint_mask = _make_valid_mask_2d(mosaic[0])
-    gpp_monthly = _apply_2d_mask(mosaic[1:], footprint_mask)
-    gpp_annual = _annual_mean_band(gpp_monthly)
-    gpp_data = np.concatenate([gpp_monthly, gpp_annual], axis=0)
-
-    out_path = os.path.join(outdir, f"gpp_{tehsil}_{year}.tif")
-    profile.update({"count": 13})
-    _save_geotiff(
-        gpp_data,
-        profile,
-        out_path,
-        band_names=[f"GPP_{abbr}_gC_m2_day" for abbr in MONTH_ABBR] + ["GPP_annual_mean"],
+    grid_proj = aet_stack.select("ET_01").projection()
+    proj_info = grid_proj.getInfo()
+    export_region = region.bounds(1)
+    common_mask = _build_common_pixel_mask(region, grid_proj)
+    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
+    footprint = aet_stack.select("ET_01").mask()
+    gpp_monthly = gpp_stack.updateMask(footprint)
+    gpp_annual = _ee_annual_mean_band(gpp_monthly, "GPP", band_name="GPP_annual").updateMask(footprint)
+    image = _finalize_export_image(
+        gpp_monthly,
+        gpp_annual,
+        region,
         metadata={
+            "application": "gpp",
             "units": "g C / m2 / day",
             "method": "LUE: PAR x fAPAR x eps_max x TMIN_scalar x VPD_scalar",
             "par_source": "GLDAS SWdown_f_tavg * 0.0864 * 0.45",
@@ -1333,16 +1151,26 @@ def run_gpp(cfg: dict, region: ee.Geometry, aet_stack=None,
             "vpd_source": "GLDAS Tair+Qair+Psurf Magnus formula",
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "description": "Mean daily GPP per month (LUE) + annual mean at 30 m",
         },
+        band_descriptions=[f"GPP_{abbr}_gC_m2_day" for abbr in MONTH_ABBR] + ["GPP_annual_mean"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    _print_stats("Monthly GPP (g C/m2/day) - all months / all pixels", gpp_monthly)
-    _print_stats("Annual mean GPP (g C/m2/day)", gpp_annual)
-
-    if cfg.get("plot"):
-        _plot_gpp(gpp_monthly, tehsil, year, outdir)
-
-    return out_path
+    task_spec = _export_product_asset(
+        "gpp",
+        "GPP",
+        image,
+        cfg,
+        export_region,
+        proj_info,
+        "Annual mean GPP (g C/m2/day)",
+        fixed_pixel_count=common_pixel_count,
+    )
+    if cfg.get("wait_exports", True):
+        _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
+    return task_spec["asset_id"]
 
 
 # =============================================================================
@@ -1353,12 +1181,10 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
             gap_flags=None, gpp_stack=None) -> str:
     """
     Water Use Efficiency = GPP / AET (g C / kg H2O)
-    Output  : wue_<TEHSIL>_<YEAR>.tif  (13 bands)
+    Output  : wue_<tehsil>_<year> GEE asset (13 bands)
     """
     tehsil = cfg["tehsil_name"]
     year = cfg["year"]
-    outdir = cfg["output"]
-    chunk_size = cfg.get("chunk_size", 25000)
 
     print(f"\n{'=' * 60}")
     print(f"  [wue]  {tehsil}  |  {year}  |  WUE = GPP / AET")
@@ -1375,31 +1201,21 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
         proj = _get_proj_30m(region, year)
         gpp_stack = build_gpp_stack(region, year, proj)
 
-    combined_wue = aet_stack.addBands(gpp_stack.unmask(NODATA))
-
-    print("  Downloading pixel data (AET 12 bands + GPP 12 bands = 24 bands) ...")
-    tile_paths = _download_image_as_geotiff(combined_wue, region, chunk_size, "wue")
-    mosaic, profile = _merge_tiles(tile_paths)
-    if mosaic is None:
-        return None
-
-    aet_raw = mosaic[:12]
-    gpp_monthly = mosaic[12:]
-    footprint_mask = _make_valid_mask_2d(aet_raw[0])
-    wue_monthly = _apply_2d_mask(compute_wue_numpy(gpp_monthly, aet_raw), footprint_mask)
-    wue_annual = _annual_mean_band(wue_monthly)
-    wue_data = np.concatenate([wue_monthly, wue_annual], axis=0)
-
     gap_months = [MONTH_ABBR[i] for i, gap in enumerate(gap_flags or []) if gap]
-
-    out_path = os.path.join(outdir, f"wue_{tehsil}_{year}.tif")
-    profile.update({"count": 13})
-    _save_geotiff(
-        wue_data,
-        profile,
-        out_path,
-        band_names=[f"WUE_{abbr}_gC_per_kgH2O" for abbr in MONTH_ABBR] + ["WUE_annual_mean"],
+    grid_proj = aet_stack.select("ET_01").projection()
+    proj_info = grid_proj.getInfo()
+    export_region = region.bounds(1)
+    common_mask = _build_common_pixel_mask(region, grid_proj)
+    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
+    footprint = aet_stack.select("ET_01").mask()
+    wue_monthly = build_wue_image(aet_stack, gpp_stack).updateMask(footprint)
+    wue_annual = _ee_annual_mean_band(wue_monthly, "WUE", band_name="WUE_annual").updateMask(footprint)
+    image = _finalize_export_image(
+        wue_monthly,
+        wue_annual,
+        region,
         metadata={
+            "application": "wue",
             "units": "g C / kg H2O",
             "formula": "GPP (LUE) / AET (RF downscaled)",
             "gpp_method": "PAR x fAPAR x eps_max x TMIN_scalar x VPD_scalar",
@@ -1407,20 +1223,30 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
             "bplut_source": "MOD17 C6 BPLUT / MCD12Q1 IGBP LC_Type1",
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "gap_filled_months": ",".join(gap_months) or "none",
             "description": (
                 "WUE = GPP/AET per month + annual mean at 30 m. "
                 "Units: g C fixed per kg of water transpired."
             ),
         },
+        band_descriptions=[f"WUE_{abbr}_gC_per_kgH2O" for abbr in MONTH_ABBR] + ["WUE_annual_mean"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    _print_stats("Monthly WUE (g C / kg H2O) - all months / all pixels", wue_monthly)
-    _print_stats("Annual mean WUE (g C / kg H2O)", wue_annual)
-
-    if cfg.get("plot"):
-        _plot_wue(wue_monthly, tehsil, year, outdir)
-
-    return out_path
+    task_spec = _export_product_asset(
+        "wue",
+        "WUE",
+        image,
+        cfg,
+        export_region,
+        proj_info,
+        "Annual mean WUE (g C/kg H2O)",
+        fixed_pixel_count=common_pixel_count,
+    )
+    if cfg.get("wait_exports", True):
+        _wait_for_tasks([task_spec], cfg.get("poll_seconds", 30))
+    return task_spec["asset_id"]
 
 
 # =============================================================================
@@ -1430,17 +1256,15 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
 def run_all(cfg: dict, region: ee.Geometry) -> dict:
     """
     Run the three feature layers and three derived applications
-    in ONE combined GEE download.
+    from one shared set of GEE stacks and export them to assets.
 
     Pixel consistency guarantee:
-      All outputs are derived from a single 60-band image download.
+      All outputs are derived from the same AET/PET/GPP stacks.
       They are therefore spatially identical - same CRS, transform, and
       pixel grid. No post-processing alignment is needed.
     """
     year = cfg["year"]
     tehsil = cfg["tehsil_name"]
-    outdir = cfg["output"]
-    chunk_size = cfg.get("chunk_size", 25000)
     modis_col = cfg.get("modis_collection", MODIS_COL)
 
     print(f"\n{'=' * 60}")
@@ -1458,428 +1282,174 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
 
     print("\n  [3/3] Building GPP stack (LUE: GLDAS + Landsat NDVI + MCD12Q1) ...")
     gpp_stack = build_gpp_stack(region, year, proj)
-
-    print("\n  Building combined image (60 bands) ...")
-    combined = build_combined_image(aet_stack, pet_stack, gpp_stack)
-
-    print("\n  Downloading all bands in ONE pass (60 bands) ...")
-    tile_paths = _download_image_as_geotiff(combined, region, chunk_size, "all")
-    mosaic, profile = _merge_tiles(tile_paths)
-
-    if mosaic is None:
-        print("[ERROR] No pixel data returned.")
-        return {}
-
     gap_months = [MONTH_ABBR[i] for i, gap in enumerate(gap_flags or []) if gap]
     gap_meta = ",".join(gap_months) or "none"
+    grid_proj = aet_stack.select("ET_01").projection()
+    proj_info = grid_proj.getInfo()
+    export_region = region.bounds(1)
+    common_mask = _build_common_pixel_mask(region, grid_proj)
+    common_pixel_count = _count_mask_pixels(common_mask, export_region, proj_info)
+    footprint = aet_stack.select("ET_01").mask()
     results = {}
+    task_specs = []
 
-    et_monthly = _scale_nodata(mosaic[_AET_SLICE], scale=0.1)
-    footprint_mask = _make_valid_mask_2d(et_monthly[0])
-    annual_data = _apply_2d_mask(_annual_total_band(et_monthly, year), footprint_mask)
-    et_data = np.concatenate([et_monthly, annual_data], axis=0)
-    path = os.path.join(outdir, f"aet_{tehsil}_{year}.tif")
-    _save_geotiff(
-        et_data,
-        profile,
-        path,
-        band_names=[f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"],
+    aet_monthly = aet_stack.multiply(0.1)
+    aet_annual = (
+        _ee_annual_total_band(aet_monthly, "ET", year, band_name="ET_annual")
+        .updateMask(footprint)
+    )
+    aet_image = _finalize_export_image(
+        aet_monthly,
+        aet_annual,
+        region,
         metadata={
+            "application": "aet",
             "units": "bands 1-12: mm/day; band 13: mm/yr",
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
+            "model_aez": cfg["model_aez"],
             "gap_filled_months": gap_meta,
             "description": "Bands 1-12: mean daily AET per month at 30 m; band 13: annual total AET",
         },
+        band_descriptions=[f"ET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["ET_annual_mm"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    results["aet"] = path
-    pet_monthly = _apply_2d_mask(_scale_nodata(mosaic[_PET_SLICE], scale=0.1), footprint_mask)
-    pet_annual = _annual_total_band(pet_monthly, year)
-    pet_data = np.concatenate([pet_monthly, pet_annual], axis=0)
-    path = os.path.join(outdir, f"pet_{tehsil}_{year}.tif")
-    _save_geotiff(
-        pet_data,
-        profile,
-        path,
-        band_names=[f"PET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["PET_annual_mm"],
+    spec = _export_product_asset("aet", "AET", aet_image, cfg, export_region, proj_info, "Annual ET (mm/yr)", fixed_pixel_count=common_pixel_count)
+    task_specs.append(spec)
+    results["aet"] = spec["asset_id"]
+
+    pet_monthly = pet_stack.multiply(0.1).updateMask(footprint)
+    pet_annual = _ee_annual_total_band(pet_monthly, "PET", year, band_name="PET_annual").updateMask(footprint)
+    pet_image = _finalize_export_image(
+        pet_monthly,
+        pet_annual,
+        region,
         metadata={
+            "application": "pet",
             "units": "bands 1-12: mm/day; band 13: mm/yr",
             "source": "MODIS MOD16A2",
+            "modis_collection": modis_col,
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "description": "Bands 1-12: mean daily PET per month at 30 m; band 13: annual total PET",
         },
+        band_descriptions=[f"PET_{abbr}_daily_mm" for abbr in MONTH_ABBR] + ["PET_annual_mm"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    results["pet"] = path
+    spec = _export_product_asset("pet", "PET", pet_image, cfg, export_region, proj_info, "Annual PET (mm/yr)", fixed_pixel_count=common_pixel_count)
+    task_specs.append(spec)
+    results["pet"] = spec["asset_id"]
 
-    rwdi_monthly = _apply_2d_mask(mosaic[_RWDI_SLICE], footprint_mask)
-    rwdi_annual = _annual_mean_band(rwdi_monthly)
-    rwdi_data = np.concatenate([rwdi_monthly, rwdi_annual], axis=0)
-    path = os.path.join(outdir, f"rwdi_{tehsil}_{year}.tif")
-    _save_geotiff(
-        rwdi_data,
-        profile,
-        path,
-        band_names=[f"RWDI_{abbr}" for abbr in MONTH_ABBR] + ["RWDI_annual"],
+    rwdi_monthly = build_rwdi_image(aet_stack, pet_stack).updateMask(footprint)
+    rwdi_annual = _ee_annual_mean_band(rwdi_monthly, "RWDI", band_name="RWDI_annual").updateMask(footprint)
+    rwdi_image = _finalize_export_image(
+        rwdi_monthly,
+        rwdi_annual,
+        region,
         metadata={
+            "application": "rwdi",
             "units": "percent",
             "formula": "(1 - AET/PET) * 100",
+            "modis_collection": modis_col,
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "description": "RWDI per month + annual mean",
         },
+        band_descriptions=[f"RWDI_{abbr}" for abbr in MONTH_ABBR] + ["RWDI_annual"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    results["rwdi"] = path
+    spec = _export_product_asset("rwdi", "RWDI", rwdi_image, cfg, export_region, proj_info, "Annual mean RWDI (%)", fixed_pixel_count=common_pixel_count)
+    task_specs.append(spec)
+    results["rwdi"] = spec["asset_id"]
 
-    kc_monthly = _apply_2d_mask(mosaic[_KC_SLICE], footprint_mask)
-    kc_annual = _annual_mean_band(kc_monthly)
-    kc_data = np.concatenate([kc_monthly, kc_annual], axis=0)
-    path = os.path.join(outdir, f"kc_{tehsil}_{year}.tif")
-    _save_geotiff(
-        kc_data,
-        profile,
-        path,
-        band_names=[f"KC_{abbr}" for abbr in MONTH_ABBR] + ["KC_annual"],
+    kc_monthly = build_kc_image(aet_stack, pet_stack).updateMask(footprint)
+    kc_annual = _ee_annual_mean_band(kc_monthly, "KC", band_name="KC_annual").updateMask(footprint)
+    kc_image = _finalize_export_image(
+        kc_monthly,
+        kc_annual,
+        region,
         metadata={
+            "application": "kc",
             "units": "ratio (AET/PET)",
             "formula": "AET / PET",
+            "modis_collection": modis_col,
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "description": "Monthly Kc proxy from AET/PET + annual mean",
         },
+        band_descriptions=[f"KC_{abbr}" for abbr in MONTH_ABBR] + ["KC_annual"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    results["kc"] = path
+    spec = _export_product_asset("kc", "Crop Coefficient (Kc)", kc_image, cfg, export_region, proj_info, "Annual mean Crop Coefficient (Kc)", fixed_pixel_count=common_pixel_count)
+    task_specs.append(spec)
+    results["kc"] = spec["asset_id"]
 
-    gpp_monthly = _apply_2d_mask(mosaic[_GPP_SLICE], footprint_mask)
-    gpp_annual = _annual_mean_band(gpp_monthly)
-    gpp_data = np.concatenate([gpp_monthly, gpp_annual], axis=0)
-    path = os.path.join(outdir, f"gpp_{tehsil}_{year}.tif")
-    _save_geotiff(
-        gpp_data,
-        profile,
-        path,
-        band_names=[f"GPP_{abbr}_gC_m2_day" for abbr in MONTH_ABBR] + ["GPP_annual_mean"],
+    gpp_monthly = gpp_stack.updateMask(footprint)
+    gpp_annual = _ee_annual_mean_band(gpp_monthly, "GPP", band_name="GPP_annual").updateMask(footprint)
+    gpp_image = _finalize_export_image(
+        gpp_monthly,
+        gpp_annual,
+        region,
         metadata={
+            "application": "gpp",
             "units": "g C / m2 / day",
             "method": "LUE: PAR x fAPAR x eps_max x TMIN_scalar x VPD_scalar",
+            "par_source": "GLDAS SWdown_f_tavg * 0.0864 * 0.45",
+            "fapar_source": "Landsat 8 NDVI -> 1.24*NDVI - 0.168",
+            "bplut_source": "MOD17 C6 / MCD12Q1 IGBP LC_Type1",
+            "tmin_source": "GLDAS Tair_f_inst monthly minimum (K-273.15)",
+            "vpd_source": "GLDAS Tair+Qair+Psurf Magnus formula",
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "description": "Mean daily GPP per month (LUE) + annual mean",
         },
+        band_descriptions=[f"GPP_{abbr}_gC_m2_day" for abbr in MONTH_ABBR] + ["GPP_annual_mean"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    results["gpp"] = path
+    spec = _export_product_asset("gpp", "GPP", gpp_image, cfg, export_region, proj_info, "Annual mean GPP (g C/m2/day)", fixed_pixel_count=common_pixel_count)
+    task_specs.append(spec)
+    results["gpp"] = spec["asset_id"]
 
-    wue_monthly = _apply_2d_mask(compute_wue_numpy(gpp_monthly, mosaic[_AET_SLICE]), footprint_mask)
-    wue_annual = _annual_mean_band(wue_monthly)
-    wue_data = np.concatenate([wue_monthly, wue_annual], axis=0)
-    path = os.path.join(outdir, f"wue_{tehsil}_{year}.tif")
-    _save_geotiff(
-        wue_data,
-        profile,
-        path,
-        band_names=[f"WUE_{abbr}_gC_per_kgH2O" for abbr in MONTH_ABBR] + ["WUE_annual_mean"],
+    wue_monthly = build_wue_image(aet_stack, gpp_stack).updateMask(footprint)
+    wue_annual = _ee_annual_mean_band(wue_monthly, "WUE", band_name="WUE_annual").updateMask(footprint)
+    wue_image = _finalize_export_image(
+        wue_monthly,
+        wue_annual,
+        region,
         metadata={
+            "application": "wue",
             "units": "g C / kg H2O",
             "formula": "GPP (LUE) / AET (RF downscaled)",
+            "gpp_method": "PAR x fAPAR x eps_max x TMIN_scalar x VPD_scalar",
+            "aet_method": "Landsat8 + GLDAS features -> Random Forest",
+            "bplut_source": "MOD17 C6 BPLUT / MCD12Q1 IGBP LC_Type1",
             "year": str(year),
             "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
             "gap_filled_months": gap_meta,
             "description": "WUE per month + annual mean at 30 m",
         },
+        band_descriptions=[f"WUE_{abbr}_gC_per_kgH2O" for abbr in MONTH_ABBR] + ["WUE_annual_mean"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
     )
-    results["wue"] = path
+    spec = _export_product_asset("wue", "WUE", wue_image, cfg, export_region, proj_info, "Annual mean WUE (g C/kg H2O)", fixed_pixel_count=common_pixel_count)
+    task_specs.append(spec)
+    results["wue"] = spec["asset_id"]
 
-    _print_stats("Annual ET (mm/yr)", annual_data)
-    _print_stats("Annual PET (mm/yr)", pet_annual)
-    _print_stats("Annual mean RWDI (%)", rwdi_annual)
-    _print_stats("Annual mean Kc (AET/PET)", kc_annual)
-    _print_stats("Annual mean GPP (g C/m2/day)", gpp_annual)
-    _print_stats("Annual mean WUE (g C/kg H2O)", wue_annual)
-
-    if cfg.get("plot"):
-        _plot_aet(et_monthly, tehsil, year, outdir)
-        _plot_pet(pet_monthly, tehsil, year, outdir)
-        _plot_rwdi(rwdi_monthly, tehsil, year, outdir)
-        _plot_kc(kc_monthly, tehsil, year, outdir)
-        _plot_gpp(gpp_monthly, tehsil, year, outdir)
-        _plot_wue(wue_monthly, tehsil, year, outdir)
-
-    run_sample_timeseries(results, cfg)
+    if cfg.get("wait_exports", True):
+        _wait_for_tasks(task_specs, cfg.get("poll_seconds", 30))
     return results
-
-
-# =============================================================================
-# SAMPLE POINT TIME SERIES
-# =============================================================================
-
-def run_sample_timeseries(output_paths: dict, cfg: dict):
-    """
-    Extract the 12-month time series from the pixel nearest to a requested
-    lon/lat and produce a 6-panel plot. Uses rasterio.sample on the output
-    GeoTIFFs - no additional GEE calls are made.
-    """
-    lon = cfg.get("sample_lon")
-    lat = cfg.get("sample_lat")
-    if lon is None or lat is None:
-        return
-
-    tehsil = cfg["tehsil_name"]
-    year = cfg["year"]
-    outdir = cfg["output"]
-
-    print(f"\n[sample] Sampling pixel at lon={lon:.6f}, lat={lat:.6f}")
-
-    def _sample(tif_path):
-        if tif_path is None or not os.path.exists(tif_path):
-            return None
-        with rasterio.open(tif_path) as ds:
-            vals = list(ds.sample([(lon, lat)]))[0].astype(np.float32)
-            vals[vals == NODATA] = np.nan
-        return vals
-
-    aet = _sample(output_paths.get("aet"))
-    pet = _sample(output_paths.get("pet"))
-    rwdi = _sample(output_paths.get("rwdi"))
-    kc = _sample(output_paths.get("kc"))
-    gpp = _sample(output_paths.get("gpp"))
-    wue = _sample(output_paths.get("wue"))
-
-    if aet is None:
-        print("  [sample] AET GeoTIFF not available - skipping.")
-        return
-
-    aet_m = aet[:12] if aet is not None else np.full(12, np.nan)
-    rwdi_m = rwdi[:12] if rwdi is not None else np.full(12, np.nan)
-    kc_m = kc[:12] if kc is not None else np.full(12, np.nan)
-    pet_m = pet[:12] if pet is not None else np.full(12, np.nan)
-    gpp_m = gpp[:12] if gpp is not None else np.full(12, np.nan)
-    wue_m = wue[:12] if wue is not None else np.full(12, np.nan)
-
-    if cfg.get("plot"):
-        _plot_sample_timeseries(aet_m, pet_m, rwdi_m, kc_m, gpp_m, wue_m,
-                                lon, lat, tehsil, year, outdir)
-
-
-# =============================================================================
-# PLOTS
-# =============================================================================
-
-def _band_stats(arr: np.ndarray, nodata: float = NODATA):
-    """Per-band mean and std, ignoring NoData, NaN, and +/-inf."""
-    out_mean, out_std = [], []
-    for band_idx in range(arr.shape[0]):
-        values = arr[band_idx]
-        good = ~((values == nodata) | np.isnan(values) | np.isinf(values))
-        values = values[good].astype(np.float64)
-        out_mean.append(np.nanmean(values) if values.size else np.nan)
-        out_std.append(np.nanstd(values) if values.size else np.nan)
-    return np.array(out_mean), np.array(out_std)
-
-
-def _plot_monthly_series(arr, tehsil, year, outdir, *,
-                         filename, title, ylabel, theme_key,
-                         marker="o", y_limits=None,
-                         ref_lines=None, ref_spans=None):
-    """Shared monthly line-chart style for all 12-band products."""
-    if not HAS_MPL:
-        return
-    os.makedirs(outdir, exist_ok=True)
-    means, stds = _band_stats(arr)
-    colors = PLOT_THEME[theme_key]
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-
-    for span in ref_spans or []:
-        ax.axhspan(span["ymin"], span["ymax"],
-                   color=span.get("color", "#cccccc"),
-                   alpha=span.get("alpha", 0.06),
-                   zorder=0)
-
-    for line in ref_lines or []:
-        ax.axhline(line["y"], color=line.get("color", "#666666"),
-                   linestyle=line.get("linestyle", "--"),
-                   linewidth=line.get("linewidth", 1.2),
-                   alpha=line.get("alpha", 0.9),
-                   label=line.get("label"))
-
-    ax.plot(MONTH_ABBR, means, marker=marker, color=colors["line"],
-            linewidth=2.6, markersize=7, label="Mean across pixels")
-    ax.fill_between(range(12), means - stds, means + stds,
-                    alpha=0.22, color=colors["fill"], label="+/-1 std")
-
-    ax.set_title(f"{title} - {tehsil} ({year})", fontsize=13, fontweight="bold")
-    ax.set_xlabel("Month")
-    ax.set_ylabel(ylabel)
-    if y_limits is not None:
-        ax.set_ylim(*y_limits)
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
-    ax.legend(fontsize=9, loc="best")
-    plt.tight_layout()
-
-    path = os.path.join(outdir, filename)
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Plot -> {path}")
-
-
-def _plot_aet(arr, tehsil, year, outdir):
-    _plot_monthly_series(
-        arr, tehsil, year, outdir,
-        filename=f"aet_{tehsil}_{year}.png",
-        title="Monthly Mean Daily AET",
-        ylabel="AET (mm/day)",
-        theme_key="aet",
-        marker="o",
-    )
-
-
-def _plot_pet(arr, tehsil, year, outdir):
-    _plot_monthly_series(
-        arr, tehsil, year, outdir,
-        filename=f"pet_{tehsil}_{year}.png",
-        title="Monthly Mean Daily PET (MODIS MOD16A2)",
-        ylabel="PET (mm/day)",
-        theme_key="pet",
-        marker="s",
-    )
-
-
-def _plot_rwdi(arr, tehsil, year, outdir):
-    ref_spans = [
-        {"ymin": lo, "ymax": hi, "color": color, "alpha": 0.06}
-        for lo, hi, color, _ in RWDI_CLASSES
-    ]
-    ref_lines = [
-        {"y": 30, "color": "#9ACD32", "label": "30%"},
-        {"y": 50, "color": "#FFA500", "label": "50%"},
-        {"y": 80, "color": "#FF0000", "label": "80%"},
-    ]
-    _plot_monthly_series(
-        arr, tehsil, year, outdir,
-        filename=f"rwdi_{tehsil}_{year}.png",
-        title="Monthly RWDI (pixel mean)",
-        ylabel="RWDI (%)",
-        theme_key="rwdi",
-        marker="o",
-        y_limits=(0, 100),
-        ref_lines=ref_lines,
-        ref_spans=ref_spans,
-    )
-
-
-def _plot_ratio(arr, tehsil, year, outdir, prefix, title, filename):
-    _plot_monthly_series(
-        arr, tehsil, year, outdir,
-        filename=filename,
-        title=title,
-        ylabel=prefix,
-        theme_key="ratio",
-        marker="s",
-        y_limits=(0, 1.25),
-        ref_lines=[
-            {"y": 1.0, "color": "#1A4FA3", "label": "No stress (1.0)"},
-            {"y": 0.5, "color": "#FF8C00", "label": "Moderate (0.5)"},
-            {"y": 0.3, "color": "#FF0000", "label": "High (0.3)"},
-        ],
-    )
-
-
-def _plot_kc(arr, tehsil, year, outdir):
-    _plot_ratio(arr, tehsil, year, outdir,
-                prefix="Kc (AET / PET)",
-                title="Monthly Kc (AET/PET)",
-                filename=f"kc_{tehsil}_{year}.png")
-
-
-def _plot_gpp(arr, tehsil, year, outdir):
-    _plot_monthly_series(
-        arr, tehsil, year, outdir,
-        filename=f"gpp_{tehsil}_{year}.png",
-        title="Monthly Mean Daily GPP (LUE)",
-        ylabel="GPP (g C / m2 / day)",
-        theme_key="gpp",
-        marker="^",
-    )
-
-
-def _plot_wue(arr, tehsil, year, outdir):
-    _plot_monthly_series(
-        arr, tehsil, year, outdir,
-        filename=f"wue_{tehsil}_{year}.png",
-        title="Monthly Water Use Efficiency (WUE = GPP / AET)",
-        ylabel="WUE (g C / kg H2O)",
-        theme_key="wue",
-        marker="D",
-    )
-
-
-def _plot_sample_timeseries(aet, pet, rwdi, kc, gpp, wue,
-                            lon, lat, tehsil, year, outdir):
-    """6-panel monthly timeseries for a single pixel."""
-    if not HAS_MPL:
-        return
-    fig, axes = plt.subplots(2, 3, figsize=(18, 9))
-    fig.suptitle(
-        f"Monthly Time Series - Single Pixel  |  {tehsil} ({year})\n"
-        f"lon={lon:.5f}, lat={lat:.5f}",
-        fontsize=13, fontweight="bold", y=1.01
-    )
-
-    ax = axes[0, 0]
-    ax.plot(MONTH_ABBR, aet, marker="o", color=PLOT_THEME["aet"]["line"], linewidth=2.2, markersize=7)
-    ax.fill_between(range(12), aet, alpha=0.15, color=PLOT_THEME["aet"]["fill"])
-    ax.set_title("Mean Daily AET (mm/day)")
-    ax.set_ylabel("AET (mm/day)")
-    ax.grid(axis="y", linestyle="--", alpha=0.4)
-
-    ax = axes[0, 1]
-    ax.plot(MONTH_ABBR, pet, marker="s", color=PLOT_THEME["pet"]["line"], linewidth=2.2, markersize=7)
-    ax.fill_between(range(12), pet, alpha=0.15, color=PLOT_THEME["pet"]["fill"])
-    ax.set_title("Mean Daily PET (mm/day) - MODIS")
-    ax.set_ylabel("PET (mm/day)")
-    ax.grid(axis="y", linestyle="--", alpha=0.4)
-
-    ax = axes[0, 2]
-    ax.plot(MONTH_ABBR, gpp, marker="^", color=PLOT_THEME["gpp"]["line"], linewidth=2.2, markersize=7)
-    ax.fill_between(range(12), gpp, alpha=0.15, color=PLOT_THEME["gpp"]["fill"])
-    ax.set_title("Mean Daily GPP (g C/m2/day) - LUE")
-    ax.set_ylabel("GPP (g C/m2/day)")
-    ax.grid(axis="y", linestyle="--", alpha=0.4)
-
-    ax = axes[1, 0]
-    for lo, hi, color, _ in RWDI_CLASSES:
-        ax.axhspan(lo, hi, color=color, alpha=0.05, zorder=0)
-    ax.plot(MONTH_ABBR, rwdi, marker="o", color=PLOT_THEME["rwdi"]["line"], linewidth=2.2, markersize=7)
-    ax.fill_between(range(12), rwdi, alpha=0.15, color=PLOT_THEME["rwdi"]["fill"])
-    ax.set_ylim(0, 100)
-    ax.set_title("Monthly RWDI (%)")
-    ax.set_ylabel("RWDI (%)")
-    ax.grid(axis="y", linestyle="--", alpha=0.4)
-
-    ax = axes[1, 1]
-    ax.plot(MONTH_ABBR, kc, marker="s", color=PLOT_THEME["ratio"]["line"], linewidth=2.2, markersize=7)
-    ax.fill_between(range(12), kc, alpha=0.12, color=PLOT_THEME["ratio"]["fill"])
-    ax.axhline(1.0, color="#1a4fa3", linestyle="--", linewidth=1.1, label="No stress (1.0)")
-    ax.axhline(0.5, color="#FF8C00", linestyle="--", linewidth=1.1, label="Moderate (0.5)")
-    ax.axhline(0.3, color="#FF0000", linestyle="--", linewidth=1.1, label="High (0.3)")
-    ax.set_ylim(0, 1.25)
-    ax.set_title("Monthly Kc (AET/PET)")
-    ax.set_ylabel("Kc")
-    ax.legend(fontsize=8)
-    ax.grid(axis="y", linestyle="--", alpha=0.4)
-
-    ax = axes[1, 2]
-    ax.plot(MONTH_ABBR, wue, marker="D", color=PLOT_THEME["wue"]["line"], linewidth=2.2, markersize=7)
-    ax.fill_between(range(12), wue, alpha=0.15, color=PLOT_THEME["wue"]["fill"])
-    ax.set_title("Monthly WUE (g C / kg H2O)")
-    ax.set_ylabel("WUE (g C / kg H2O)")
-    ax.grid(axis="y", linestyle="--", alpha=0.4)
-
-    plt.tight_layout()
-    path = os.path.join(outdir, f"sample_point_{tehsil}_{year}.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Plot -> {path}")
 
 
 # =============================================================================
@@ -1889,7 +1459,7 @@ def _plot_sample_timeseries(aet, pet, rwdi, kc, gpp, wue,
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="et_applications",
-        description="Pan-India ET Downscaling + GPP/WUE - GeoTIFF Raster Edition",
+        description="Pan-India ET Downscaling + GPP/WUE - direct GEE asset export",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -1900,21 +1470,18 @@ def build_parser():
     parser.add_argument("--model-aez", default=None,
                         help="GEE asset path for the RF ensemble model")
     parser.add_argument("--year", type=int, default=None)
-    parser.add_argument("--output", default=None, metavar="DIR")
-    parser.add_argument("--plot", action="store_true", default=False)
+    parser.add_argument("--asset-root", default=None,
+                        help="Parent GEE asset path where exports will be created")
+    parser.add_argument("--overwrite-assets", action="store_true", default=False,
+                        help="Delete an existing target asset before exporting.")
+    parser.add_argument("--no-wait-exports", action="store_true", default=False,
+                        help="Start GEE export tasks and exit without polling for completion.")
     parser.add_argument("--gee-project", default=None)
     parser.add_argument("--tehsil-name", default=None)
-    parser.add_argument("--chunk-size", type=int, default=None,
-                        help="Approx pixels per download tile (default: 25000). "
-                             "Lower if you get GEE memory errors.")
     parser.add_argument("--application", default=None,
                         choices=["all", "aet", "pet",
                                  "rwdi", "kc", "gpp", "wue"],
                         help="Which output mode to run (default: all).")
-    parser.add_argument("--sample-lon", type=float, default=None,
-                        help="Longitude for single-pixel timeseries plot.")
-    parser.add_argument("--sample-lat", type=float, default=None,
-                        help="Latitude for single-pixel timeseries plot.")
     return parser
 
 
@@ -1925,6 +1492,8 @@ def main():
     config_path = pathlib.Path(args.config) if args.config else CONFIG_PATH
     cfg = load_config(config_path)
     cfg = merge_args(cfg, args)
+    if args.overwrite_assets:
+        cfg["overwrite_assets"] = True
 
     app = cfg.get("application", "all")
 
@@ -1932,27 +1501,28 @@ def main():
         parser.error("tehsil_asset is required (config.yaml or --tehsil-asset)")
     if not cfg.get("model_aez"):
         parser.error("model_aez is required (config.yaml or --model-aez)")
+    if not cfg.get("asset_root"):
+        parser.error("export.asset_root is required (config.yaml or --asset-root)")
     if not cfg.get("tehsil_name"):
         cfg["tehsil_name"] = cfg["tehsil_asset"].rstrip("/").split("/")[-1].upper()
 
     print("\n" + "=" * 68)
-    print("  ET-Applications  (GeoTIFF Raster Edition - v3.0 with GPP/WUE/Kc)")
+    print("  ET-Applications  (GEE Asset Export Edition - v3.0 with GPP/WUE/Kc)")
     print("=" * 68)
     for label, key in [
         ("Tehsil", "tehsil_name"),
         ("Year", "year"),
         ("Output mode", "application"),
-        ("Output dir", "output"),
+        ("Asset root", "asset_root"),
+        ("Overwrite assets", "overwrite_assets"),
         ("GEE project", "gee_project"),
         ("Model (AEZ)", "model_aez"),
         ("Tehsil asset", "tehsil_asset"),
-        ("Chunk size", "chunk_size"),
-        ("Plots", "plot"),
+        ("Wait for exports", "wait_exports"),
+        ("Poll interval (s)", "poll_seconds"),
         ("MODIS collection", "modis_collection"),
     ]:
         print(f"  {label:<22}: {cfg.get(key, 'N/A')}")
-    if cfg.get("sample_lon") is not None:
-        print(f"  {'Sample point':<22}: lon={cfg['sample_lon']}, lat={cfg['sample_lat']}")
     print("=" * 68 + "\n")
 
     init_ee(cfg.get("gee_project", ""))
@@ -1969,12 +1539,12 @@ def main():
     }
 
     result = dispatch[app]()
-
-    if app != "all" and isinstance(result, str):
-        output_paths = {app: result}
-        run_sample_timeseries(output_paths, cfg)
-
-    print(f"\nDone. All outputs in: {os.path.abspath(cfg.get('output', './results'))}")
+    if app == "all":
+        print("\nDone. Export assets:")
+        for label, asset_id in result.items():
+            print(f"  {label:<5} -> {asset_id}")
+    else:
+        print(f"\nDone. Export asset: {result}")
 
 
 if __name__ == "__main__":
