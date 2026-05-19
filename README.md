@@ -20,9 +20,8 @@
 10. [Output Asset Band Reference](#10-output-asset-band-reference)
 11. [config.yaml Parameter Reference](#11-configyaml-parameter-reference)
 12. [AEZ Model Assets](#12-aez-model-assets)
-13. [Python Function Reference](#13-python-function-reference)
-14. [Using the GEE Visualizer Scripts](#14-using-the-gee-visualizer-scripts)
-15. [Changing to a Different Tehsil](#15-changing-to-a-different-tehsil)
+13. [Using the GEE Visualizer Scripts](#13-using-the-gee-visualizer-scripts)
+14. [Changing to a Different Tehsil](#14-changing-to-a-different-tehsil)
 
 ---
 
@@ -457,119 +456,7 @@ delineation, see:
 
 ---
 
-## 13. Python Function Reference
-
-This section explains the major functions in `et_applications.py` and where they
-fit in the workflow.
-
-### Configuration
-
-**`load_config(path)`**  
-Reads `config.yaml` and returns a Python dictionary of settings.
-
-**`merge_args(cfg, args)`**  
-Merges config values with any CLI overrides.
-
-### Earth Engine Initialisation
-
-**`init_ee(project)`**  
-Initialises the GEE Python client.
-
-**`load_tehsil(asset)`**  
-Loads the tehsil boundary FeatureCollection from GEE and extracts its geometry.
-
-### GEE Image Building
-
-**`build_classifier(model_path)`**  
-Loads the pre-trained Random Forest ensemble from a GEE asset.
-
-**`calc_landsat_indices(img)`**  
-Computes the Landsat-derived spectral indices required by the RF model.
-
-**`predict_daily_et(ls_img, region, classifier)`**  
-Builds the feature stack for one Landsat scene and predicts daily ET.
-
-**`build_aet_stack(region, classifier, year)`**  
-Builds the 12-band monthly AET stack.
-
-**`build_pet_stack(region, year, modis_col_id, proj)`**  
-Builds the 12-band monthly PET stack on the AET-aligned grid.
-
-**`build_rwdi_image(aet_stack, pet_stack)`**  
-Computes monthly RWDI from AET and PET.
-
-**`build_kc_image(aet_stack, pet_stack)`**  
-Computes monthly Kc from AET and PET.
-
-**`build_gpp_stack(region, year, proj)`**  
-Builds the 12-band monthly GPP stack using the LUE framework.
-
-**`_build_bplut_image(lc_img)`**  
-Maps MODIS land-cover classes to the BPLUT parameter layers used by GPP.
-
-**`build_wue_image(aet_stack, gpp_stack)`**  
-Computes monthly WUE from GPP and AET.
-
-### Annual Aggregation Helpers
-
-**`_ee_annual_total_band(monthly_stack, prefix, year, band_name)`**  
-Computes a pixel-wise annual total inside Earth Engine from 12 monthly
-mean-daily bands.
-
-**`_ee_annual_mean_band(monthly_stack, prefix, band_name)`**  
-Computes a pixel-wise annual mean inside Earth Engine from 12 monthly bands.
-
-### Asset Export Helpers
-
-**`_build_asset_id(cfg, label)`**  
-Builds the final asset path under `export.asset_root`.
-
-**`_prepare_asset_target(asset_id, overwrite)`**  
-Checks whether the destination asset exists and optionally deletes it before
-export.
-
-**`_finalize_export_image(monthly_stack, annual_band, region, metadata, band_descriptions, ...)`**  
-Builds the final 13-band image, applies the common tehsil mask, and attaches
-metadata.
-
-**`_export_product_asset(label, display_name, image, cfg, export_region, proj_info, stats_label, ...)`**  
-Prints annual statistics and launches the Earth Engine asset export task.
-
-**`_wait_for_tasks(task_specs, poll_seconds)`**  
-Polls Earth Engine export tasks until completion when `wait_for_tasks: true`.
-
-### Output Runners
-
-**`run_aet(cfg, region, ...)`**  
-Builds or reuses the AET feature layer, appends annual total AET as band 13,
-and exports `aet_<TEHSIL>_<YEAR>`.
-
-**`run_pet(cfg, region, ...)`**  
-Builds or reuses the PET feature layer, appends annual total PET as band 13,
-and exports `pet_<TEHSIL>_<YEAR>`.
-
-**`run_rwdi(cfg, region, ...)`**  
-Builds RWDI, appends annual mean RWDI as band 13, and exports
-`rwdi_<TEHSIL>_<YEAR>`.
-
-**`run_kc(cfg, region, ...)`**  
-Builds Kc, appends annual mean Kc as band 13, and exports `kc_<TEHSIL>_<YEAR>`.
-
-**`run_gpp(cfg, region, ...)`**  
-Builds GPP, appends annual mean GPP as band 13, and exports
-`gpp_<TEHSIL>_<YEAR>`.
-
-**`run_wue(cfg, region, ...)`**  
-Builds WUE, appends annual mean WUE as band 13, and exports
-`wue_<TEHSIL>_<YEAR>`.
-
-**`run_all(cfg, region)`**  
-Builds the three feature layers once and exports all six aligned assets in one
-run.
-
----
-
-## 14. Using the GEE Visualizer Scripts
+## 13. Using the GEE Visualizer Scripts
 
 The `gee_visualizers/` folder contains one Earth Engine Code Editor script for
 each output:
@@ -618,7 +505,7 @@ Band 13 meaning:
 
 ---
 
-## 15. Changing to a Different Tehsil
+## 14. Changing to a Different Tehsil
 
 To process a new tehsil, repeat the following steps. `et_applications.py` does
 not need to be modified.

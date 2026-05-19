@@ -692,11 +692,13 @@ def _start_asset_export(image: ee.Image, asset_id: str, description: str):
     return task
 
 
-def _wait_for_tasks(task_specs: list, poll_seconds: int = 30) -> None:
+def _wait_for_tasks(task_specs: list, poll_seconds: int = 30,
+                    fail_on_error: bool = False) -> dict:
     if not task_specs:
-        return
+        return {}
     poll_seconds = max(5, int(poll_seconds))
     pending = {spec["asset_id"]: spec for spec in task_specs}
+    final_statuses = {}
     print(f"\n[exports] Waiting for {len(task_specs)} Earth Engine task(s) ...")
     while pending:
         finished_now = []
@@ -705,6 +707,7 @@ def _wait_for_tasks(task_specs: list, poll_seconds: int = 30) -> None:
             state = status.get("state", "UNKNOWN")
             if state in {"COMPLETED", "FAILED", "CANCELLED", "CANCEL_REQUESTED"}:
                 finished_now.append(asset_id)
+                final_statuses[asset_id] = status
                 print(f"  [{state}] {spec['label']} -> {asset_id}")
                 if status.get("error_message"):
                     print(f"    Error: {status['error_message']}")
@@ -713,6 +716,21 @@ def _wait_for_tasks(task_specs: list, poll_seconds: int = 30) -> None:
         if pending:
             print(f"  Still running: {len(pending)} task(s). Checking again in {poll_seconds}s ...")
             time.sleep(poll_seconds)
+    if fail_on_error:
+        failed = []
+        for spec in task_specs:
+            asset_id = spec["asset_id"]
+            status = final_statuses.get(asset_id, {})
+            state = status.get("state", "UNKNOWN")
+            if state != "COMPLETED":
+                message = status.get("error_message", "No error message from Earth Engine.")
+                failed.append(f"{spec['label']} ({asset_id}) -> {state}: {message}")
+        if failed:
+            raise RuntimeError(
+                "One or more Earth Engine export tasks did not complete successfully:\n"
+                + "\n".join(failed)
+            )
+    return final_statuses
 
 
 def _export_product_asset(label: str, display_name: str, image: ee.Image,
@@ -1098,8 +1116,13 @@ def run_wue(cfg: dict, region: ee.Geometry, aet_stack=None,
 
 def run_all(cfg: dict, region: ee.Geometry) -> dict:
     """
-    Run the three feature layers and three derived applications
-    from one shared set of GEE stacks and export them to assets.
+    Run the three core layers first, wait for them to finish exporting,
+    then export the three derived applications.
+
+    Export sequencing guarantee:
+      1. Start AET, PET, and GPP export tasks.
+      2. Wait until all three core exports reach a terminal state.
+      3. Only then start RWDI, KC, and WUE export tasks.
 
     Pixel consistency guarantee:
       All outputs are derived from the same AET/PET/GPP stacks.
@@ -1128,7 +1151,8 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
     common_mask = _build_common_pixel_mask(region, grid_proj)
     footprint = aet_stack.select("ET_01").mask()
     results = {}
-    task_specs = []
+    core_task_specs = []
+    derived_task_specs = []
 
     aet_monthly = aet_stack.multiply(0.1)
     aet_annual = (
@@ -1153,7 +1177,7 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         common_mask=common_mask,
     )
     spec = _export_product_asset("aet", "AET", aet_image, cfg)
-    task_specs.append(spec)
+    core_task_specs.append(spec)
     results["aet"] = spec["asset_id"]
 
     pet_monthly = pet_stack.multiply(0.1).updateMask(footprint)
@@ -1177,56 +1201,8 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         common_mask=common_mask,
     )
     spec = _export_product_asset("pet", "PET", pet_image, cfg)
-    task_specs.append(spec)
+    core_task_specs.append(spec)
     results["pet"] = spec["asset_id"]
-
-    rwdi_monthly = build_rwdi_image(aet_stack, pet_stack).updateMask(footprint)
-    rwdi_annual = _ee_annual_mean_band(rwdi_monthly, "RWDI", band_name="RWDI_annual").updateMask(footprint)
-    rwdi_image = _finalize_export_image(
-        rwdi_monthly,
-        rwdi_annual,
-        region,
-        metadata={
-            "application": "rwdi",
-            "units": "percent",
-            "formula": "(1 - AET/PET) * 100",
-            "modis_collection": modis_col,
-            "year": str(year),
-            "tehsil": tehsil,
-            "tehsil_asset": cfg["tehsil_asset"],
-            "description": "RWDI per month + annual mean",
-        },
-        band_descriptions=[f"RWDI_{abbr}" for abbr in MONTH_ABBR] + ["RWDI_annual"],
-        default_proj=grid_proj,
-        common_mask=common_mask,
-    )
-    spec = _export_product_asset("rwdi", "RWDI", rwdi_image, cfg)
-    task_specs.append(spec)
-    results["rwdi"] = spec["asset_id"]
-
-    kc_monthly = build_kc_image(aet_stack, pet_stack).updateMask(footprint)
-    kc_annual = _ee_annual_mean_band(kc_monthly, "KC", band_name="KC_annual").updateMask(footprint)
-    kc_image = _finalize_export_image(
-        kc_monthly,
-        kc_annual,
-        region,
-        metadata={
-            "application": "kc",
-            "units": "ratio (AET/PET)",
-            "formula": "AET / PET",
-            "modis_collection": modis_col,
-            "year": str(year),
-            "tehsil": tehsil,
-            "tehsil_asset": cfg["tehsil_asset"],
-            "description": "Monthly Kc proxy from AET/PET + annual mean",
-        },
-        band_descriptions=[f"KC_{abbr}" for abbr in MONTH_ABBR] + ["KC_annual"],
-        default_proj=grid_proj,
-        common_mask=common_mask,
-    )
-    spec = _export_product_asset("kc", "Crop Coefficient (Kc)", kc_image, cfg)
-    task_specs.append(spec)
-    results["kc"] = spec["asset_id"]
 
     gpp_monthly = gpp_stack.updateMask(footprint)
     gpp_annual = _ee_annual_mean_band(gpp_monthly, "GPP", band_name="GPP_annual").updateMask(footprint)
@@ -1253,8 +1229,61 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         common_mask=common_mask,
     )
     spec = _export_product_asset("gpp", "GPP", gpp_image, cfg)
-    task_specs.append(spec)
+    core_task_specs.append(spec)
     results["gpp"] = spec["asset_id"]
+
+    print("\n  [phase 1/2] Waiting for core exports (AET, PET, GPP) before derived exports ...")
+    _wait_for_tasks(core_task_specs, cfg.get("poll_seconds", 30), fail_on_error=True)
+
+    print("\n  [phase 2/2] Starting derived exports (RWDI, KC, WUE) from the shared core stacks ...")
+
+    rwdi_monthly = build_rwdi_image(aet_stack, pet_stack).updateMask(footprint)
+    rwdi_annual = _ee_annual_mean_band(rwdi_monthly, "RWDI", band_name="RWDI_annual").updateMask(footprint)
+    rwdi_image = _finalize_export_image(
+        rwdi_monthly,
+        rwdi_annual,
+        region,
+        metadata={
+            "application": "rwdi",
+            "units": "percent",
+            "formula": "(1 - AET/PET) * 100",
+            "modis_collection": modis_col,
+            "year": str(year),
+            "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
+            "description": "RWDI per month + annual mean",
+        },
+        band_descriptions=[f"RWDI_{abbr}" for abbr in MONTH_ABBR] + ["RWDI_annual"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
+    )
+    spec = _export_product_asset("rwdi", "RWDI", rwdi_image, cfg)
+    derived_task_specs.append(spec)
+    results["rwdi"] = spec["asset_id"]
+
+    kc_monthly = build_kc_image(aet_stack, pet_stack).updateMask(footprint)
+    kc_annual = _ee_annual_mean_band(kc_monthly, "KC", band_name="KC_annual").updateMask(footprint)
+    kc_image = _finalize_export_image(
+        kc_monthly,
+        kc_annual,
+        region,
+        metadata={
+            "application": "kc",
+            "units": "ratio (AET/PET)",
+            "formula": "AET / PET",
+            "modis_collection": modis_col,
+            "year": str(year),
+            "tehsil": tehsil,
+            "tehsil_asset": cfg["tehsil_asset"],
+            "description": "Monthly Kc proxy from AET/PET + annual mean",
+        },
+        band_descriptions=[f"KC_{abbr}" for abbr in MONTH_ABBR] + ["KC_annual"],
+        default_proj=grid_proj,
+        common_mask=common_mask,
+    )
+    spec = _export_product_asset("kc", "Crop Coefficient (Kc)", kc_image, cfg)
+    derived_task_specs.append(spec)
+    results["kc"] = spec["asset_id"]
 
     wue_monthly = build_wue_image(aet_stack, gpp_stack).updateMask(footprint)
     wue_annual = _ee_annual_mean_band(wue_monthly, "WUE", band_name="WUE_annual").updateMask(footprint)
@@ -1279,11 +1308,13 @@ def run_all(cfg: dict, region: ee.Geometry) -> dict:
         common_mask=common_mask,
     )
     spec = _export_product_asset("wue", "WUE", wue_image, cfg)
-    task_specs.append(spec)
+    derived_task_specs.append(spec)
     results["wue"] = spec["asset_id"]
 
     if cfg.get("wait_exports", True):
-        _wait_for_tasks(task_specs, cfg.get("poll_seconds", 30))
+        _wait_for_tasks(derived_task_specs, cfg.get("poll_seconds", 30), fail_on_error=True)
+    else:
+        print("\n[exports] Derived export tasks started. Final completion polling skipped (wait_exports=false).")
     return results
 
 
